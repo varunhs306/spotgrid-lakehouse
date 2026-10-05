@@ -42,6 +42,18 @@ def default_region(series: Series) -> str:
     return _PRICE_REGIONS.get(series, "DE")
 
 
+def index_path(series: Series, resolution: Resolution, region: str | None = None) -> str:
+    region = region or default_region(series)
+    return f"{series.value}/{region}/index_{resolution}.json"
+
+
+def chunk_path(
+    series: Series, resolution: Resolution, start_ms: int, region: str | None = None
+) -> str:
+    region = region or default_region(series)
+    return f"{series.value}/{region}/{series.value}_{region}_{resolution}_{start_ms}.json"
+
+
 class SmardClient:
     def __init__(
         self,
@@ -67,17 +79,17 @@ class SmardClient:
 
     def index(self, series: Series, resolution: Resolution, region: str | None = None) -> list[int]:
         """Start of every weekly chunk, in epoch milliseconds, oldest first."""
-        region = region or default_region(series)
-        url = f"{self._base_url}/{series.value}/{region}/index_{resolution}.json"
-        return sorted(self._get(url).json()["timestamps"])
+        return sorted(self.get_raw(index_path(series, resolution, region)).json()["timestamps"])
 
     def chunk(
         self, series: Series, resolution: Resolution, start_ms: int, region: str | None = None
     ) -> bytes:
         """One weekly chunk exactly as served, so bronze can store it unchanged."""
-        region = region or default_region(series)
-        name = f"{series.value}_{region}_{resolution}_{start_ms}.json"
-        return self._get(f"{self._base_url}/{series.value}/{region}/{name}").content
+        return self.get_raw(chunk_path(series, resolution, start_ms, region)).content
+
+    def get_raw(self, path: str) -> httpx.Response:
+        """GET a path below the base URL, with retries and rate limiting."""
+        return self._get(f"{self._base_url}/{path}")
 
     def _get(self, url: str) -> httpx.Response:
         attempt = 1
