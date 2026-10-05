@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import time
+from collections.abc import Callable
 from datetime import UTC, datetime
 from enum import IntEnum, StrEnum
 from types import TracebackType
@@ -12,6 +14,7 @@ import httpx
 
 BASE_URL = "https://www.smard.de/app/chart_data"
 USER_AGENT = "spotgrid-lakehouse (+https://github.com/varunhs306/spotgrid-lakehouse)"
+RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
 
 
 class Series(IntEnum):
@@ -40,9 +43,27 @@ def default_region(series: Series) -> str:
 
 
 class SmardClient:
-    def __init__(self, http: httpx.Client | None = None, base_url: str = BASE_URL) -> None:
+    def __init__(
+        self,
+        http: httpx.Client | None = None,
+        base_url: str = BASE_URL,
+        *,
+        max_attempts: int = 5,
+        backoff_s: float = 1.0,
+        max_backoff_s: float = 30.0,
+        min_interval_s: float = 0.5,
+        sleep: Callable[[float], None] = time.sleep,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
         self._http = http or httpx.Client(timeout=30, headers={"User-Agent": USER_AGENT})
         self._base_url = base_url.rstrip("/")
+        self._max_attempts = max_attempts
+        self._backoff_s = backoff_s
+        self._max_backoff_s = max_backoff_s
+        self._min_interval_s = min_interval_s
+        self._sleep = sleep
+        self._clock = clock
+        self._last_request_at: float | None = None
 
     def index(self, series: Series, resolution: Resolution, region: str | None = None) -> list[int]:
         """Start of every weekly chunk, in epoch milliseconds, oldest first."""
@@ -59,9 +80,40 @@ class SmardClient:
         return self._get(f"{self._base_url}/{series.value}/{region}/{name}").content
 
     def _get(self, url: str) -> httpx.Response:
-        response = self._http.get(url)
-        response.raise_for_status()
-        return response
+        attempt = 1
+        while True:
+            self._wait_for_turn()
+            try:
+                response = self._http.get(url)
+            except httpx.TransportError:
+                if attempt >= self._max_attempts:
+                    raise
+                delay = self._backoff(attempt)
+            else:
+                if response.status_code not in RETRY_STATUSES or attempt >= self._max_attempts:
+                    response.raise_for_status()
+                    return response
+                delay = self._retry_after(response)
+                if delay is None:
+                    delay = self._backoff(attempt)
+            self._sleep(delay)
+            attempt += 1
+
+    def _wait_for_turn(self) -> None:
+        if self._last_request_at is not None:
+            wait = self._last_request_at + self._min_interval_s - self._clock()
+            if wait > 0:
+                self._sleep(wait)
+        self._last_request_at = self._clock()
+
+    def _backoff(self, attempt: int) -> float:
+        return min(self._backoff_s * 2 ** (attempt - 1), self._max_backoff_s)
+
+    def _retry_after(self, response: httpx.Response) -> float | None:
+        try:
+            return min(float(response.headers["Retry-After"]), self._max_backoff_s)
+        except (KeyError, ValueError):  # absent, or the HTTP-date form
+            return None
 
     def close(self) -> None:
         self._http.close()
