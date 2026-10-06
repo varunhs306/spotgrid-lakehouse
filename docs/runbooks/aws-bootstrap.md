@@ -9,9 +9,11 @@ It is applied from a laptop with an admin profile. Everything else in `infra/` i
 
 | Role | Trusted OIDC subject | Can do |
 |---|---|---|
-| `spotgrid-ci-plan` | `repo:<repo>:pull_request` | Read `spotgrid-*` resources, lock state under `infra/` |
-| `spotgrid-ci-apply` | `repo:<repo>:ref:refs/heads/main` | Manage `spotgrid-*` resources; new roles must carry `spotgrid-workload-boundary` |
+| `spotgrid-ci-plan` | `<sub prefix>:pull_request` | Read `spotgrid-*` resources, lock state under `infra/` |
+| `spotgrid-ci-apply` | `<sub prefix>:ref:refs/heads/main` | Manage `spotgrid-*` resources; new roles must carry `spotgrid-workload-boundary` |
 
+`<sub prefix>` is the repo's immutable OIDC subject (`repo:owner@id/name@id`), from
+`gh api repos/OWNER/REPO/actions/oidc/customization/sub`.
 Neither role can change itself, the other CI role or the boundary.
 
 ## First apply
