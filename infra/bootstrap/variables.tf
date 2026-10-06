@@ -2,3 +2,9 @@ variable "region" {
   type    = string
   default = "us-east-1"
 }
+
+variable "github_repository" {
+  type        = string
+  description = "owner/name of the repository whose workflows may assume the CI roles"
+  default     = "varunhs306/spotgrid-lakehouse"
+}
