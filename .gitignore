@@ -7,3 +7,9 @@ dist/
 build/
 *.egg-info/
 .env
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+*_override.tf
+crash.log
