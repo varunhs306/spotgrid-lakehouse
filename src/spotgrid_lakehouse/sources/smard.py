@@ -94,9 +94,12 @@ class SmardClient:
         """One weekly chunk exactly as served, so bronze can store it unchanged."""
         return self.get_raw(chunk_path(series, resolution, start_ms, region)).content
 
+    def url(self, path: str) -> str:
+        return f"{self._base_url}/{path}"
+
     def get_raw(self, path: str) -> httpx.Response:
         """GET a path below the base URL, with retries and rate limiting."""
-        return self._get(f"{self._base_url}/{path}")
+        return self._get(self.url(path))
 
     def _get(self, url: str) -> httpx.Response:
         attempt = 1
