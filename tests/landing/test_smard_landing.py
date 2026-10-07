@@ -41,9 +41,13 @@ def test_manifest_records_checksum_and_source_url(client, volume):
     }
 
 
-def test_manifest_is_written_after_the_chunks(client, volume):
+def test_writes_chunks_then_manifest_then_index(client, volume):
     land_price_week(client, volume)
-    assert volume.writes[-1] == f"{FOLDER}/_manifest.json"
+    assert volume.writes == [
+        f"{FOLDER}/{NAME}",
+        f"{FOLDER}/_manifest.json",
+        "smard/4169/DE-LU/hour/_index.json",
+    ]
 
 
 def test_same_day_rerun_keeps_earlier_manifest_entries(client, volume):
