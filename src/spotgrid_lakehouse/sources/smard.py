@@ -47,11 +47,18 @@ def index_path(series: Series, resolution: Resolution, region: str | None = None
     return f"{series.value}/{region}/index_{resolution}.json"
 
 
+def chunk_name(
+    series: Series, resolution: Resolution, start_ms: int, region: str | None = None
+) -> str:
+    region = region or default_region(series)
+    return f"{series.value}_{region}_{resolution}_{start_ms}.json"
+
+
 def chunk_path(
     series: Series, resolution: Resolution, start_ms: int, region: str | None = None
 ) -> str:
     region = region or default_region(series)
-    return f"{series.value}/{region}/{series.value}_{region}_{resolution}_{start_ms}.json"
+    return f"{series.value}/{region}/{chunk_name(series, resolution, start_ms, region)}"
 
 
 class SmardClient:
