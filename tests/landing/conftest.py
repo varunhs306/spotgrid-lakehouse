@@ -14,6 +14,9 @@ class FakeVolume:
         self.files: dict[str, bytes] = {}
         self.writes: list[str] = []
 
+    def read(self, path: str) -> bytes | None:
+        return self.files.get(path)
+
     def write(self, path: str, data: bytes) -> None:
         self.files[path] = data
         self.writes.append(path)

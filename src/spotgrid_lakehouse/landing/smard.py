@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import argparse
-from collections.abc import Iterable
+import hashlib
+import json
+from collections.abc import Callable, Iterable
 from datetime import UTC, date, datetime
 
 from databricks.sdk import WorkspaceClient
@@ -14,10 +16,13 @@ from spotgrid_lakehouse.sources.smard import (
     Series,
     SmardClient,
     chunk_name,
+    chunk_path,
     default_region,
 )
 
 SOURCE = "smard"
+MANIFEST = "_manifest.json"
+MANIFEST_VERSION = 1
 
 
 def landing_dir(
@@ -33,17 +38,51 @@ def land(
     series: Series,
     resolution: Resolution,
     starts: Iterable[int],
-    fetch_date: date,
     region: str | None = None,
+    now: Callable[[], datetime] = lambda: datetime.now(UTC),
 ) -> list[str]:
-    """Fetch each chunk and write it unchanged. Returns the paths written."""
+    """Fetch each chunk and write it unchanged, then record it in the folder's manifest.
+
+    Returns the chunk paths written.
+    """
+    region = region or default_region(series)
+    fetch_date = now().date()
     folder = landing_dir(series, resolution, fetch_date, region)
+    manifest = _read_manifest(volume, folder) or {
+        "version": MANIFEST_VERSION,
+        "source": SOURCE,
+        "series": series.value,
+        "region": region,
+        "resolution": str(resolution),
+        "fetch_date": fetch_date.isoformat(),
+        "files": {},
+    }
     written = []
     for start in starts:
-        path = f"{folder}/{chunk_name(series, resolution, start, region)}"
-        volume.write(path, client.chunk(series, resolution, start, region))
-        written.append(path)
+        raw = client.chunk(series, resolution, start, region)
+        name = chunk_name(series, resolution, start, region)
+        volume.write(f"{folder}/{name}", raw)
+        written.append(f"{folder}/{name}")
+        manifest["files"][name] = {
+            "chunk_start_ms": start,
+            "sha256": hashlib.sha256(raw).hexdigest(),
+            "bytes": len(raw),
+            "source_url": client.url(chunk_path(series, resolution, start, region)),
+            "fetched_at": now().isoformat(),
+        }
+    # Written last, so it never lists a chunk that is missing from the folder.
+    if written:
+        volume.write(f"{folder}/{MANIFEST}", _dump(manifest))
     return written
+
+
+def _read_manifest(volume: Volume, folder: str) -> dict | None:
+    raw = volume.read(f"{folder}/{MANIFEST}")
+    return json.loads(raw) if raw is not None else None
+
+
+def _dump(document: dict) -> bytes:
+    return json.dumps(document, indent=2, sort_keys=True).encode()
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -60,13 +99,12 @@ def main(argv: list[str] | None = None) -> None:
     args = parser.parse_args(argv)
 
     volume = DatabricksVolume(args.root, WorkspaceClient(profile=args.profile))
-    fetch_date = datetime.now(UTC).date()
     with SmardClient() as client:
         for name in args.series:
             for resolution in args.resolution:
                 series = Series[name]
                 starts = client.index(series, resolution)[-args.weeks :]
-                written = land(client, volume, series, resolution, starts, fetch_date)
+                written = land(client, volume, series, resolution, starts)
                 print(f"{series.name} {resolution}: wrote {len(written)}")
 
 
