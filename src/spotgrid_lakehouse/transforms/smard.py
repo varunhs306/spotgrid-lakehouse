@@ -10,6 +10,8 @@ CHUNK_SCHEMA = "series ARRAY<ARRAY<DOUBLE>>"
 
 # smard/{series}/{region}/{resolution}/fetch_date=YYYY-MM-DD/{chunk}.json, as written by landing.
 PATH_PATTERN = r"/smard/(\d+)/([^/]+)/([a-z]+)/fetch_date=[^/]+/[^/]+\.json$"
+# Market days and the daily summaries follow German local time.
+LOCAL_TZ = "Europe/Berlin"
 
 
 def parse_chunks(chunks: DataFrame) -> DataFrame:
@@ -37,3 +39,14 @@ def parse_chunks(chunks: DataFrame) -> DataFrame:
         )
         .where(F.col("value").isNotNull())
     )
+
+
+def with_time_columns(rows: DataFrame) -> DataFrame:
+    """Replace `ts_ms` (slot start, epoch ms) with `ts_utc` and the slot's `local_date`.
+
+    The session time zone must be UTC: `to_date` reads the shifted timestamp in it.
+    """
+    ts_utc = F.timestamp_millis("ts_ms")
+    return rows.withColumns(
+        {"ts_utc": ts_utc, "local_date": F.to_date(F.from_utc_timestamp(ts_utc, LOCAL_TZ))}
+    ).drop("ts_ms")
