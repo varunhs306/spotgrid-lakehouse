@@ -47,3 +47,18 @@ and a revised chunk lands again under the new fetch date. Writes go chunk → ma
 an interrupted run is redone by the next one. One writer at a time.
 
 Check: `databricks fs ls dbfs:/Volumes/workspace/bronze/landing/smard/4169/DE-LU/hour/`
+
+## Build silver
+
+The `silver_smard` job in `databricks.yml` merges landed chunks into
+`workspace.silver.smard_timeseries`, one row per series, region, resolution and slot. Code ships
+as a wheel to serverless compute.
+
+```sh
+databricks bundle deploy -p spotlake
+databricks bundle run silver_smard -p spotlake              # chunks landed in the last 3 days
+databricks bundle run silver_smard -p spotlake -- --all     # every chunk in bronze
+```
+
+The job prints the MERGE metrics. A value changes only when a newer landing disagrees, which bumps
+`revision_count`; replaying older chunks changes nothing, so a rerun reports 0 inserted, 0 updated.
