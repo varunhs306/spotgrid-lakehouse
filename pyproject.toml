@@ -13,6 +13,7 @@ dependencies = [
 
 [dependency-groups]
 dev = [
+    "pyspark>=4.2.0",
     "pytest>=8",
     "ruff>=0.13",
 ]
