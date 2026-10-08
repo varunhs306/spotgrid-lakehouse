@@ -1,0 +1,37 @@
+bundle:
+  name: spotgrid-lakehouse
+
+# Code ships in the wheel; only job entrypoints are synced to the workspace.
+sync:
+  paths:
+    - jobs
+
+artifacts:
+  wheel:
+    type: whl
+    build: uv build --wheel
+    path: .
+    # Serverless caches environments by wheel name; a fresh version per deploy avoids stale code.
+    dynamic_version: true
+
+resources:
+  jobs:
+    silver_smard:
+      name: silver_smard
+      tasks:
+        - task_key: merge
+          environment_key: default
+          spark_python_task:
+            python_file: jobs/silver_smard.py
+            parameters: ["--lookback-days", "3"]
+      environments:
+        - environment_key: default
+          spec:
+            environment_version: "4"
+            dependencies:
+              - ./dist/*.whl
+
+targets:
+  dev:
+    mode: development
+    default: true
