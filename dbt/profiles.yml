@@ -1,0 +1,12 @@
+# Connection comes from the environment; see docs/runbooks/databricks-workspace.md.
+spotgrid:
+  target: local
+  outputs:
+    local:
+      type: databricks
+      catalog: workspace
+      schema: gold
+      host: "{{ env_var('DATABRICKS_HOST') | replace('https://', '') }}"
+      http_path: "{{ env_var('DATABRICKS_HTTP_PATH') }}"
+      token: "{{ env_var('DATABRICKS_TOKEN') }}"
+      threads: 4

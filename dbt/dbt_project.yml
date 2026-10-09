@@ -1,0 +1,10 @@
+name: spotgrid
+version: "1.0.0"
+profile: spotgrid
+
+model-paths: ["models"]
+
+models:
+  spotgrid:
+    gold:
+      +materialized: table
