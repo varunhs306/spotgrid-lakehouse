@@ -42,6 +42,7 @@ data "aws_iam_policy_document" "github_trust" {
 
 # Shared by both roles: state access and the reads terraform plan needs.
 data "aws_iam_policy_document" "ci_read" {
+  #checkov:skip=CKV_AWS_356:Read-only Describe calls Terraform makes for alarms and log groups; scope them when those resources land
   statement {
     sid       = "StateList"
     actions   = ["s3:ListBucket"]

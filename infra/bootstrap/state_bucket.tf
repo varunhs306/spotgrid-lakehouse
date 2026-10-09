@@ -1,4 +1,8 @@
 resource "aws_s3_bucket" "tf_state" {
+  #checkov:skip=CKV_AWS_145:SSE-S3; a customer-managed KMS key costs 1 USD a month
+  #checkov:skip=CKV_AWS_144:Versioning covers recovery; replication doubles storage cost
+  #checkov:skip=CKV_AWS_18:Only the CI roles and the admin profile can reach it; a log bucket costs more than it protects
+  #checkov:skip=CKV2_AWS_62:Nothing consumes state bucket events
   bucket = "spotgrid-tfstate-${data.aws_caller_identity.current.account_id}"
 
   lifecycle {
