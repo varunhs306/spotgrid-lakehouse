@@ -46,7 +46,8 @@ gh variable set AWS_APPLY_ROLE_ARN --body "$(terraform output -raw ci_apply_role
 gh variable set TF_STATE_BUCKET --body "$(terraform output -raw state_bucket)"
 ```
 
-Check: the `aws-auth` job of the `terraform` workflow passes on a pull request that touches `infra/`.
+Check: the `plan` job of the `terraform` workflow posts a plan on a pull request that touches
+`infra/`, and merging it runs `apply`.
 
 ## Later changes
 
