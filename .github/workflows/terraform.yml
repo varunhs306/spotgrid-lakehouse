@@ -30,6 +30,9 @@ jobs:
             terraform -chdir="$dir" init -backend=false -input=false
             terraform -chdir="$dir" validate
           done
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+      - name: checkov
+        run: uvx --from checkov==3.3.26 checkov -d infra --framework terraform --quiet --compact
 
   aws-auth:
     runs-on: ubuntu-latest
