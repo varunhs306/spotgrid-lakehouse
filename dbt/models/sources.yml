@@ -1,0 +1,18 @@
+version: 2
+
+sources:
+  - name: silver
+    database: workspace
+    schema: silver
+    tables:
+      - name: smard_timeseries
+        description: >
+          SMARD series at native resolution, one row per series, region, resolution and slot.
+          Built by the silver_smard job. Bundesnetzagentur | SMARD.de (CC BY 4.0).
+        columns:
+          - name: series_id
+            data_tests: [not_null]
+          - name: ts_utc
+            data_tests: [not_null]
+          - name: value
+            data_tests: [not_null]
