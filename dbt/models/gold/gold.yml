@@ -1,0 +1,36 @@
+version: 2
+
+models:
+  - name: hourly_features
+    description: >
+      One row per UTC hour: day-ahead price, load, wind and solar actuals and forecasts, and
+      residual load. Bundesnetzagentur | SMARD.de (CC BY 4.0).
+    columns:
+      - name: ts_utc
+        description: Hour start
+        data_tests: [unique, not_null]
+      - name: local_date
+        description: Hour start date in Europe/Berlin
+        data_tests: [not_null]
+      - name: price_eur_mwh
+        description: Day-ahead price, bidding zone DE-LU
+      - name: load_mwh
+        description: Grid load
+      - name: residual_load_mwh
+        description: Load minus wind and solar generation; null until all four are published
+      - name: source_resolution
+        description: Resolution of the silver rows this hour was built from
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ["hour"]
+
+  - name: daily_price_summary
+    description: Day-ahead price statistics per German local day.
+    columns:
+      - name: local_date
+        data_tests: [unique, not_null]
+      - name: negative_price_hours
+        description: Hours with a price below zero
+      - name: price_hours
+        description: Hours with a published price; 23 or 25 on daylight-saving days
