@@ -6,12 +6,17 @@ The public API reads these files, so it never wakes the warehouse.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import io
+import json
 import os
+from collections.abc import Callable
+from datetime import UTC, datetime
 from typing import Protocol
 from urllib.parse import urlparse
 
 import pyarrow as pa
+import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
 GOLD_SCHEMA = "workspace.gold"
@@ -19,6 +24,9 @@ GOLD_SCHEMA = "workspace.gold"
 TABLES = {"hourly_features": "ts_utc", "daily_price_summary": "local_date"}
 PREFIX = "gold"
 PARQUET = "application/vnd.apache.parquet"
+MANIFEST_KEY = "_manifest.json"
+MANIFEST_VERSION = 1
+ATTRIBUTION = "Bundesnetzagentur | SMARD.de (CC BY 4.0)"
 
 
 class Warehouse(Protocol):
@@ -39,14 +47,39 @@ def to_parquet(table: pa.Table) -> bytes:
     return sink.getvalue()
 
 
-def export(warehouse: Warehouse, store: Store, tables: dict[str, str] = TABLES) -> list[str]:
-    """Write each table to its fixed key, replacing the previous export."""
-    keys = []
+def export(
+    warehouse: Warehouse,
+    store: Store,
+    tables: dict[str, str] = TABLES,
+    now: Callable[[], datetime] = lambda: datetime.now(UTC),
+) -> dict:
+    """Write each table to its fixed key, then the manifest that describes them.
+
+    The manifest goes last: readers that start from it never see an export half written.
+    """
+    entries = {}
     for name, time_column in tables.items():
+        data = warehouse.read(name, time_column)
+        body = to_parquet(data)
         key = parquet_key(name)
-        store.put(key, to_parquet(warehouse.read(name, time_column)), PARQUET)
-        keys.append(key)
-    return keys
+        store.put(key, body, PARQUET)
+        latest = pc.max(data[time_column]).as_py() if data.num_rows else None
+        entries[name] = {
+            "key": key,
+            "rows": data.num_rows,
+            "time_column": time_column,
+            "max_time": latest.isoformat() if latest is not None else None,
+            "sha256": hashlib.sha256(body).hexdigest(),
+            "bytes": len(body),
+        }
+    manifest = {
+        "version": MANIFEST_VERSION,
+        "exported_at": now().isoformat(),
+        "attribution": ATTRIBUTION,
+        "tables": entries,
+    }
+    store.put(MANIFEST_KEY, json.dumps(manifest, indent=2).encode(), "application/json")
+    return manifest
 
 
 class SqlWarehouse:
@@ -94,10 +127,11 @@ def main(argv: list[str] | None = None) -> None:
 
     warehouse = SqlWarehouse(args.http_path, args.profile)
     try:
-        for key in export(warehouse, S3Store(args.bucket)):
-            print(f"wrote s3://{args.bucket}/{key}")
+        manifest = export(warehouse, S3Store(args.bucket))
     finally:
         warehouse.close()
+    for name, entry in manifest["tables"].items():
+        print(f"{name}: {entry['rows']} rows up to {entry['max_time']} -> {entry['key']}")
 
 
 if __name__ == "__main__":
