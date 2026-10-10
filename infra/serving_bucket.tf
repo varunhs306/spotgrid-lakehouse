@@ -1,5 +1,5 @@
-# Daily gold export (Parquet + manifest) that the public API reads. Private: only the
-# export step and the API's role touch it. Everything here can be rebuilt from silver.
+# Daily gold export (Parquet + manifest) that the public API reads, plus the API's Lambda zip.
+# Private: only CI, the export step and the API's role touch it. Everything here can be rebuilt.
 resource "aws_s3_bucket" "serving" {
   #checkov:skip=CKV_AWS_145:SSE-S3; a customer-managed KMS key costs 1 USD a month
   #checkov:skip=CKV_AWS_144:Data is rebuilt from silver, so replication only adds cost
@@ -62,6 +62,20 @@ resource "aws_s3_bucket_lifecycle_configuration" "serving" {
 
     abort_incomplete_multipart_upload {
       days_after_initiation = 1
+    }
+  }
+
+  # Lambda keeps its own copy of the code; the apply workflow uploads the zip again if needed.
+  rule {
+    id     = "expire-lambda-zips"
+    status = "Enabled"
+
+    filter {
+      prefix = "lambda/"
+    }
+
+    expiration {
+      days = 30
     }
   }
 
