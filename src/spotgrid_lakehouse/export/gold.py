@@ -26,7 +26,11 @@ PREFIX = "gold"
 PARQUET = "application/vnd.apache.parquet"
 MANIFEST_KEY = "_manifest.json"
 MANIFEST_VERSION = 1
-ATTRIBUTION = "Bundesnetzagentur | SMARD.de (CC BY 4.0)"
+# CC BY 4.0 asks for the source, a licence link and a note that the data was changed.
+ATTRIBUTION = (
+    "Bundesnetzagentur | SMARD.de, CC BY 4.0 (https://creativecommons.org/licenses/by/4.0/); "
+    "aggregated and derived by spotgrid-lakehouse"
+)
 
 
 class Warehouse(Protocol):
