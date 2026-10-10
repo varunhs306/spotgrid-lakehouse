@@ -80,13 +80,21 @@ def exported_at():
 @pytest.fixture
 def bucket():
     bucket = Bucket()
-    export(Warehouse({"hourly_features": hourly(), "daily_price_summary": daily()}), bucket)
+    export(
+        Warehouse({"hourly_features": hourly(), "daily_price_summary": daily()}),
+        bucket,
+        now=exported_at,
+    )
     return bucket
+
+
+def now():
+    return datetime(2026, 10, 10, 7, 30, 59, tzinfo=UTC)
 
 
 @pytest.fixture
 def client(bucket):
-    return TestClient(create_app(GoldData(bucket)))
+    return TestClient(create_app(GoldData(bucket), now=now))
 
 
 def local_dates(body):
@@ -152,10 +160,26 @@ def test_bad_windows_are_rejected(client, params):
     assert client.get("/v1/prices", params=params).status_code == 422
 
 
-def test_no_export_yet_is_unavailable():
+def test_freshness_reports_the_export_and_how_far_each_table_reaches(client):
+    response = client.get("/v1/freshness")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "attribution": ATTRIBUTION,
+        "exported_at": "2026-10-10T05:00:00Z",
+        "age_minutes": 150,
+        "tables": {
+            "hourly_features": {"rows": 240, "max_time": "2026-10-10T21:00:00+00:00"},
+            "daily_price_summary": {"rows": 10, "max_time": "2026-10-10"},
+        },
+    }
+
+
+@pytest.mark.parametrize("path", ["/v1/prices", "/v1/freshness"])
+def test_no_export_yet_is_unavailable(path):
     client = TestClient(create_app(GoldData(Bucket())))
 
-    response = client.get("/v1/prices")
+    response = client.get(path)
 
     assert response.status_code == 503
     assert "cache-control" not in response.headers

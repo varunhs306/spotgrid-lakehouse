@@ -6,7 +6,8 @@ so traffic costs Lambda time and S3 reads only.
 
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta
+from collections.abc import Callable
+from datetime import UTC, date, datetime, timedelta
 from functools import reduce
 from typing import Annotated
 
@@ -59,6 +60,18 @@ class DailyPriceRow(BaseModel):
     max_price_eur_mwh: float
     negative_price_hours: int
     price_hours: int
+
+
+class TableFreshness(BaseModel):
+    rows: int
+    max_time: str | None
+
+
+class Freshness(BaseModel):
+    attribution: str
+    exported_at: datetime
+    age_minutes: int
+    tables: dict[str, TableFreshness]
 
 
 class Rows[RowT: BaseModel](BaseModel):
@@ -144,7 +157,20 @@ def generation(data: Gold, start: Start = None, end: End = None) -> Rows[Generat
     return rows(data.table(HOURLY), GenerationRow, start, end, MAX_HOURLY_DAYS)
 
 
-def create_app(data: GoldData) -> FastAPI:
+@router.get("/freshness", summary="When the data was last exported, and how far it reaches")
+def freshness(data: Gold, request: Request) -> Freshness:
+    manifest = data.manifest()
+    exported_at = datetime.fromisoformat(manifest["exported_at"])
+    age = request.app.state.now() - exported_at
+    return Freshness(
+        attribution=manifest["attribution"],
+        exported_at=exported_at,
+        age_minutes=int(age.total_seconds() // 60),
+        tables=manifest["tables"],
+    )
+
+
+def create_app(data: GoldData, now: Callable[[], datetime] = lambda: datetime.now(UTC)) -> FastAPI:
     app = FastAPI(
         title="spotgrid",
         summary="German power-market data from the spotgrid lakehouse",
@@ -152,6 +178,7 @@ def create_app(data: GoldData) -> FastAPI:
         version="1",
     )
     app.state.gold = data
+    app.state.now = now
     app.include_router(router)
 
     @app.get("/", include_in_schema=False)
