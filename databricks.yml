@@ -35,3 +35,8 @@ targets:
   dev:
     mode: development
     default: true
+  # Deployed and run by the daily workflow as the pipeline's service principal.
+  prod:
+    mode: production
+    workspace:
+      root_path: /Workspace/Users/${workspace.current_user.userName}/.bundle/${bundle.name}/${bundle.target}

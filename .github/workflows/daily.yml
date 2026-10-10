@@ -1,0 +1,59 @@
+name: daily
+
+# One linear run: land SMARD in bronze, merge silver, build gold with dbt, export to S3.
+# Day-ahead prices for tomorrow are published early afternoon in Germany.
+on:
+  schedule:
+    - cron: "17 15 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: daily
+  cancel-in-progress: false
+
+jobs:
+  pipeline:
+    # The service principal writes every layer; only main's code may run as it.
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      DATABRICKS_HOST: ${{ vars.DATABRICKS_HOST }}
+      DATABRICKS_HTTP_PATH: ${{ vars.DATABRICKS_HTTP_PATH }}
+      DATABRICKS_CLIENT_ID: ${{ vars.DATABRICKS_CLIENT_ID }}
+      DATABRICKS_CLIENT_SECRET: ${{ secrets.DATABRICKS_CLIENT_SECRET }}
+      SERVING_BUCKET: ${{ vars.SERVING_BUCKET }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+      - uses: databricks/setup-cli@9230f12203ef173d0b901846f62a55ce997efef7 # v1.19.0
+      - run: uv sync --locked --no-dev
+
+      - name: land bronze
+        run: uv run --no-dev python -m spotgrid_lakehouse.landing.smard --weeks 2
+
+      - name: merge silver
+        run: |
+          databricks bundle deploy -t prod
+          databricks bundle run silver_smard -t prod
+
+      # dbt runs as a pinned tool; see docs/runbooks/databricks-workspace.md.
+      - name: build gold
+        working-directory: dbt
+        run: >-
+          uvx --from dbt-core==1.12.5 --with dbt-databricks==1.12.6
+          dbt build --profiles-dir . --target ci
+
+      # The role trusts main only, so a run from another branch cannot publish.
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ vars.AWS_EXPORT_ROLE_ARN }}
+          aws-region: us-east-1
+      - name: export
+        run: uv run --no-dev python -m spotgrid_lakehouse.export.gold
