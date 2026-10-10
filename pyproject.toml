@@ -15,7 +15,14 @@ dependencies = [
 ]
 
 [dependency-groups]
+# What the Lambda zip ships; boto3 comes with the Lambda runtime.
+api = [
+    "fastapi>=0.140",
+    "mangum>=0.22",
+    "pyarrow>=26.0.0",
+]
 dev = [
+    { include-group = "api" },
     "pyspark>=4.2.0",
     "pytest>=8",
     "ruff>=0.13",
