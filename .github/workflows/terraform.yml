@@ -4,11 +4,19 @@ on:
   pull_request:
     paths:
       - "infra/**"
+      - "src/**"
+      - "scripts/build_lambda.py"
+      - "pyproject.toml"
+      - "uv.lock"
       - ".github/workflows/terraform.yml"
   push:
     branches: [main]
     paths:
       - "infra/**"
+      - "src/**"
+      - "scripts/build_lambda.py"
+      - "pyproject.toml"
+      - "uv.lock"
       - ".github/workflows/terraform.yml"
 
 permissions:
@@ -22,6 +30,7 @@ concurrency:
 env:
   TF_IN_AUTOMATION: "1"
   TF_INPUT: "0"
+  TF_VAR_alarm_email: ${{ secrets.ALARM_EMAIL }}
 
 jobs:
   check:
@@ -64,6 +73,8 @@ jobs:
         with:
           role-to-assume: ${{ vars.AWS_PLAN_ROLE_ARN }}
           aws-region: us-east-1
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+      - run: uv run --no-project python scripts/build_lambda.py
       - run: terraform -chdir=infra init -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}"
       - run: terraform -chdir=infra plan -lock-timeout=2m -out=tfplan
       - name: post plan
@@ -98,6 +109,20 @@ jobs:
         with:
           role-to-assume: ${{ vars.AWS_APPLY_ROLE_ARN }}
           aws-region: us-east-1
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+      - run: uv run --no-project python scripts/build_lambda.py
       - run: terraform -chdir=infra init -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}"
+      # Lambda loads the zip from the key infra/api.tf derives from its sha256.
+      - name: upload Lambda zip
+        run: |
+          bucket=$(terraform -chdir=infra output -raw serving_bucket)
+          key="lambda/api-$(sha256sum build/api-lambda.zip | cut -d' ' -f1).zip"
+          aws s3 cp build/api-lambda.zip "s3://$bucket/$key" --only-show-errors
       - run: terraform -chdir=infra plan -lock-timeout=2m -out=tfplan
       - run: terraform -chdir=infra apply -lock-timeout=2m tfplan
+      # The schema route loads the app without touching data, so it proves the zip runs.
+      - name: smoke test
+        run: |
+          url=$(terraform -chdir=infra output -raw api_url)
+          curl --fail --silent --show-error --retry 3 --retry-all-errors "${url}openapi.json" > /dev/null
+          echo "API live at $url" >> "$GITHUB_STEP_SUMMARY"
