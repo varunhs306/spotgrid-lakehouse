@@ -174,7 +174,10 @@ def create_app(data: GoldData, now: Callable[[], datetime] = lambda: datetime.no
     app = FastAPI(
         title="spotgrid",
         summary="German power-market data from the spotgrid lakehouse",
-        description=f"Data: {ATTRIBUTION}. Dates are local to Europe/Berlin; times are UTC.",
+        description=(
+            f"Data: {ATTRIBUTION}. Dates are local to Europe/Berlin; times are UTC. "
+            "Provided as is, without warranty of correctness or completeness."
+        ),
         version="1",
     )
     app.state.gold = data
