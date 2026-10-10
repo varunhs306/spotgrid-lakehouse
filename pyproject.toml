@@ -1,6 +1,6 @@
 [project]
 name = "spotgrid-lakehouse"
-version = "0.0.0"
+version = "0.1.0"
 description = "Lakehouse for German power-market data"
 authors = [
     { name = "varunhs306", email = "varunhs306@gmail.com" }
