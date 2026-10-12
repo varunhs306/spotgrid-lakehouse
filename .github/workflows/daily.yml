@@ -23,28 +23,38 @@ jobs:
     permissions:
       contents: read
       id-token: write
+      issues: write # incident and data-quality issues
+      actions: read # step times for the run report
     env:
       DATABRICKS_HOST: ${{ vars.DATABRICKS_HOST }}
       DATABRICKS_HTTP_PATH: ${{ vars.DATABRICKS_HTTP_PATH }}
       DATABRICKS_CLIENT_ID: ${{ vars.DATABRICKS_CLIENT_ID }}
       DATABRICKS_CLIENT_SECRET: ${{ secrets.DATABRICKS_CLIENT_SECRET }}
       SERVING_BUCKET: ${{ vars.SERVING_BUCKET }}
+      API_URL: ${{ vars.API_URL }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
       - uses: databricks/setup-cli@9230f12203ef173d0b901846f62a55ce997efef7 # v1.19.0
       - run: uv sync --locked --no-dev
+      - id: start
+        run: echo "at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
 
-      - name: land bronze
-        run: uv run --no-dev python -m spotgrid_lakehouse.landing.smard --weeks 2
+      - id: land
+        name: land bronze
+        run: >-
+          uv run --no-dev python -m spotgrid_lakehouse.landing.smard --weeks 2
+          --report "$RUNNER_TEMP/landing.json"
 
-      - name: merge silver
+      - id: silver
+        name: merge silver
         run: |
           databricks bundle deploy -t prod
           databricks bundle run silver_smard -t prod
 
       # dbt runs as a pinned tool; see docs/runbooks/databricks-workspace.md.
-      - name: build gold
+      - id: gold
+        name: build gold
         working-directory: dbt
         run: >-
           uvx --from dbt-core==1.12.5 --with dbt-databricks==1.12.6
@@ -55,5 +65,26 @@ jobs:
         with:
           role-to-assume: ${{ vars.AWS_EXPORT_ROLE_ARN }}
           aws-region: us-east-1
-      - name: export
-        run: uv run --no-dev python -m spotgrid_lakehouse.export.gold
+      - id: export
+        name: export
+        run: >-
+          uv run --no-dev python -m spotgrid_lakehouse.export.gold
+          --report "$RUNNER_TEMP/manifest.json"
+
+      # Runs after failures too: the summary, the issues and the Telegram digest.
+      - name: report and alerts
+        if: always() && steps.start.outcome == 'success'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: >-
+          uv run --no-dev python -m spotgrid_lakehouse.monitoring
+          --started-at "${{ steps.start.outputs.at }}"
+          --landing "$RUNNER_TEMP/landing.json"
+          --dbt-results dbt/target/run_results.json
+          --manifest "$RUNNER_TEMP/manifest.json"
+          --outcome "land bronze=${{ steps.land.outcome }}"
+          --outcome "merge silver=${{ steps.silver.outcome }}"
+          --outcome "build gold=${{ steps.gold.outcome }}"
+          --outcome "export=${{ steps.export.outcome }}"
