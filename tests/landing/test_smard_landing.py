@@ -3,7 +3,7 @@ import json
 from datetime import UTC, datetime
 from pathlib import Path
 
-from spotgrid_lakehouse.landing.smard import land
+from spotgrid_lakehouse.landing.smard import chunk_dates, land
 from spotgrid_lakehouse.sources.smard import Resolution, Series, chunk_path
 
 FIXTURES = Path(__file__).parents[1] / "fixtures" / "smard"
@@ -58,3 +58,9 @@ def test_same_day_rerun_keeps_earlier_manifest_entries(client, volume):
 
     manifest = json.loads(volume.files[f"{FOLDER}/_manifest.json"])
     assert sorted(manifest["files"]) == sorted(["earlier.json", NAME])
+
+
+def test_chunk_dates_span_local_weeks():
+    # Weekly chunks start at local midnight on Monday: 2026-09-28 and 2026-10-05.
+    assert chunk_dates([1791151200000, WEEK_2026_09_28]) == ("2026-09-28", "2026-10-11")
+    assert chunk_dates([]) is None
