@@ -7,11 +7,12 @@ from __future__ import annotations
 
 import argparse
 import os
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 import httpx
 
+from spotgrid_lakehouse.monitoring.checks import BERLIN, horizon
 from spotgrid_lakehouse.monitoring.issues import (
     DATA_QUALITY,
     INCIDENT,
@@ -30,6 +31,7 @@ from spotgrid_lakehouse.monitoring.report import (
     read_json,
 )
 from spotgrid_lakehouse.monitoring.telegram import Telegram, change_message, digest
+from spotgrid_lakehouse.sources.smard import Series
 
 
 def step_seconds(env: dict) -> dict[str, int]:
@@ -60,6 +62,17 @@ def step_seconds(env: dict) -> dict[str, int]:
     return seconds
 
 
+def tomorrow(now: datetime) -> date | None:
+    """Tomorrow's local date once its prices are due, else None."""
+    due = horizon(Series.PRICE_DE_LU, now)
+    return due if due > now.astimezone(BERLIN).date() else None
+
+
+def quiet(trigger: str, now: datetime) -> bool:
+    """The scheduled morning run only messages when something is wrong."""
+    return trigger == "schedule" and now.astimezone(BERLIN).hour < 12
+
+
 def main(argv: list[str] | None = None, env: dict | None = None) -> None:
     env = dict(os.environ) if env is None else env
     parser = argparse.ArgumentParser(description="Report on a daily run and raise its alerts.")
@@ -71,7 +84,7 @@ def main(argv: list[str] | None = None, env: dict | None = None) -> None:
         "--outcome", action="append", default=[], help="step=outcome, e.g. 'export=success'"
     )
     parser.add_argument("--profile", help="Databricks config profile; default auth chain if unset")
-    parser.add_argument("--dry-run", action="store_true", help="print the summary, alert nobody")
+    parser.add_argument("--dry-run", action="store_true", help="print, alert nobody")
     args = parser.parse_args(argv)
 
     now = datetime.now(UTC)
@@ -101,10 +114,10 @@ def main(argv: list[str] | None = None, env: dict | None = None) -> None:
         coverage=coverage,
         dbt=dbt_summary(read_json(args.dbt_results)),
         manifest=read_json(args.manifest),
-        api=check_api(env.get("API_URL")),
+        api=check_api(env.get("API_URL"), tomorrow(now)),
     )
 
-    changes, links, incident_url = [], {}, None
+    changes, links, incident = [], {}, None
     token = env.get("GITHUB_TOKEN")
     if token and repo and not args.dry_run:
         github = GitHubIssues(repo, token)
@@ -115,7 +128,7 @@ def main(argv: list[str] | None = None, env: dict | None = None) -> None:
             changes += found
         else:  # leave data issues as they are; only link the open ones
             links = {key_of(i): i["html_url"] for i in github.open_issues(DATA_QUALITY)}
-        incident_url = next((i["html_url"] for i in github.open_issues(INCIDENT)), None)
+        incident = next(((i["number"], i["html_url"]) for i in github.open_issues(INCIDENT)), None)
 
     summary = markdown(report, links)
     print(summary)
@@ -123,14 +136,19 @@ def main(argv: list[str] | None = None, env: dict | None = None) -> None:
         with open(path, "a", encoding="utf-8") as file:
             file.write(summary)
 
+    if args.dry_run:
+        print(digest(report, [], None))
     bot_token, chat_id = env.get("TELEGRAM_BOT_TOKEN"), env.get("TELEGRAM_CHAT_ID")
     if bot_token and chat_id and not args.dry_run:
         bot = Telegram(bot_token, chat_id)
-        open_issues = len(links) + (1 if incident_url else 0)
+        issues = sorted((int(url.rsplit("/", 1)[1]), url) for url in links.values())
+        problem = report["run"]["status"] == "failure" or report["findings"] or changes
         try:
-            bot.send(digest(report, open_issues, incident_url))
+            if problem or not quiet(report["run"]["trigger"], now):
+                bot.send(digest(report, issues, incident))
             for change in changes:
-                bot.send(change_message(change))
+                if message := change_message(change):
+                    bot.send(message)
         except RuntimeError as exc:
             print(f"warning: {exc}")
 

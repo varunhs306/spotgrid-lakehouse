@@ -54,7 +54,9 @@ def test_a_gap_opens_one_issue_and_closes_when_filled():
 
     changes, links = sync_findings(issues, [GAP | {"days": {"2026-10-10": "0/24 h"}}], RUN, OCT_10)
 
-    assert [(c.action, c.detail) for c in changes] == [("opened", "2026-10-10 0/24 h")]
+    assert [(c.action, c.number, c.days) for c in changes] == [
+        ("opened", 1, {"2026-10-10": "0/24 h"})
+    ]
     assert links == {"missing:PRICE_DE_LU": "https://github.com/o/r/issues/1"}
     assert "| 2026-10-10 | 0/24 h | 2026-10-10 17:14 UTC |" in issues.issues[1]["body"]
 
@@ -68,7 +70,7 @@ def test_a_gap_opens_one_issue_and_closes_when_filled():
     filled = OCT_10 + timedelta(days=2, hours=4)
     changes, links = sync_findings(issues, [], RUN, filled)
 
-    assert [(c.action, c.detail) for c in changes] == [("closed", "2026-10-10 after 2d 4h")]
+    assert [(c.action, c.days) for c in changes] == [("closed", {"2026-10-10": "after 2d 4h"})]
     assert issues.issues[1]["state"] == "closed"
     assert issues.comments[1] == [f"Resolved: 2026-10-10 after 2d 4h\n\nRun: {RUN}"]
     assert links == {}
