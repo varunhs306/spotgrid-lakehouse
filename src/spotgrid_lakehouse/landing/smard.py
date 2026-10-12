@@ -6,7 +6,9 @@ import argparse
 import hashlib
 import json
 from collections.abc import Callable, Iterable
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
+from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from databricks.sdk import WorkspaceClient
 
@@ -25,6 +27,7 @@ MANIFEST = "_manifest.json"
 INDEX = "_index.json"
 MANIFEST_VERSION = 1
 INDEX_VERSION = 1
+BERLIN = ZoneInfo("Europe/Berlin")
 
 
 def series_dir(series: Series, resolution: Resolution, region: str | None = None) -> str:
@@ -99,6 +102,19 @@ def _dump(document: dict) -> bytes:
     return json.dumps(document, indent=2, sort_keys=True).encode()
 
 
+def chunk_dates(starts: list[int]) -> tuple[str, str] | None:
+    """First and last local day covered by weekly chunks starting at `starts` (epoch ms)."""
+    if not starts:
+        return None
+
+    def local_day(ms: int):
+        return datetime.fromtimestamp(ms / 1000, BERLIN).date()
+
+    return local_day(min(starts)).isoformat(), (
+        local_day(max(starts)) + timedelta(days=6)
+    ).isoformat()
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description="Land recent SMARD chunks in the bronze volume.")
     parser.add_argument(
@@ -110,9 +126,11 @@ def main(argv: list[str] | None = None) -> None:
     )
     parser.add_argument("--root", default=LANDING_ROOT)
     parser.add_argument("--profile", help="Databricks config profile; default auth chain if unset")
+    parser.add_argument("--report", type=Path, help="write what was landed to this JSON file")
     args = parser.parse_args(argv)
 
     volume = DatabricksVolume(args.root, WorkspaceClient(profile=args.profile))
+    landed = []
     with SmardClient() as client:
         for name in args.series:
             for resolution in args.resolution:
@@ -121,6 +139,18 @@ def main(argv: list[str] | None = None) -> None:
                 written = land(client, volume, series, resolution, starts)
                 skipped = len(starts) - len(written)
                 print(f"{series.name} {resolution}: wrote {len(written)}, skipped {skipped}")
+                landed.append(
+                    {
+                        "series": series.name,
+                        "series_id": series.value,
+                        "resolution": str(resolution),
+                        "checked": len(starts),
+                        "written": len(written),
+                        "dates": chunk_dates(starts),
+                    }
+                )
+    if args.report:
+        args.report.write_text(json.dumps({"landed": landed}, indent=2))
 
 
 if __name__ == "__main__":

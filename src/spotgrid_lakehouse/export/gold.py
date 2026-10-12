@@ -12,6 +12,7 @@ import json
 import os
 from collections.abc import Callable
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Protocol
 from urllib.parse import urlparse
 
@@ -125,6 +126,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--bucket", default=os.environ.get("SERVING_BUCKET"))
     parser.add_argument("--http-path", default=os.environ.get("DATABRICKS_HTTP_PATH"))
     parser.add_argument("--profile", help="Databricks config profile; default auth chain if unset")
+    parser.add_argument("--report", type=Path, help="also write the manifest to this file")
     args = parser.parse_args(argv)
     if not args.bucket or not args.http_path:
         parser.error("set --bucket and --http-path, or SERVING_BUCKET and DATABRICKS_HTTP_PATH")
@@ -136,6 +138,8 @@ def main(argv: list[str] | None = None) -> None:
         warehouse.close()
     for name, entry in manifest["tables"].items():
         print(f"{name}: {entry['rows']} rows up to {entry['max_time']} -> {entry['key']}")
+    if args.report:
+        args.report.write_text(json.dumps(manifest, indent=2))
 
 
 if __name__ == "__main__":
