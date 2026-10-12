@@ -102,8 +102,11 @@ class SqlWarehouse:
         )
 
     def read(self, table: str, order_by: str) -> pa.Table:
+        return self.query(f"SELECT * FROM {GOLD_SCHEMA}.{table} ORDER BY {order_by}")
+
+    def query(self, sql: str, params: dict | None = None) -> pa.Table:
         with self._connection.cursor() as cursor:
-            cursor.execute(f"SELECT * FROM {GOLD_SCHEMA}.{table} ORDER BY {order_by}")
+            cursor.execute(sql, params)
             return cursor.fetchall_arrow()
 
     def close(self) -> None:
