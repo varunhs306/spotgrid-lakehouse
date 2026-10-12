@@ -221,11 +221,13 @@ def markdown(report: dict, issues: dict[str, str] | None = None) -> str:
     return "\n".join(lines) + "\n"
 
 
-def collect_warehouse(http_path: str, started_at: datetime, now: datetime) -> tuple[list, list]:
+def collect_warehouse(
+    http_path: str, started_at: datetime, now: datetime, profile: str | None = None
+) -> tuple[list, list]:
     """Silver changes in this run and recent coverage; raises if the warehouse is unreachable."""
     from spotgrid_lakehouse.export.gold import SqlWarehouse
 
-    warehouse = SqlWarehouse(http_path)
+    warehouse = SqlWarehouse(http_path, profile)
     try:
         changes = warehouse.query(SILVER_CHANGES_SQL, {"started_at": started_at}).to_pylist()
         first_day: date = now.date() - timedelta(days=WINDOW_DAYS)
