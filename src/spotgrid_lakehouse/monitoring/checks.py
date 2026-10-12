@@ -85,3 +85,36 @@ def price_revisions(revised: Iterable[tuple[int, date, int]]) -> list[Finding]:
     if not days:
         return []
     return [Finding("revised:PRICE_DE_LU", "Published day-ahead prices changed", days)]
+
+
+GROUPS = {"Prices": (Series.PRICE_DE_LU,), "Actuals": ACTUALS, "Forecasts": FORECASTS}
+
+
+def completeness(
+    coverage: Iterable[tuple[int, date, int]], findings: list[Finding], now: datetime
+) -> dict[str, dict]:
+    """Per group of series: the last local day complete without gaps, when it is due, and the
+    days with problems.
+    """
+    complete: dict[int, date] = {}
+    for series_id, day, count in coverage:
+        if count >= hours_in_day(day) and day > complete.get(series_id, date.min):
+            complete[series_id] = day
+    by_key = {f.key: f for f in findings}
+    result = {}
+    for group, members in GROUPS.items():
+        days = [complete.get(s.value) for s in members]
+        problems = {}
+        for series in members:
+            finding = by_key.get(f"missing:{series.name}")
+            for day, detail in (finding.days if finding else {}).items():
+                problems[day] = detail if len(members) == 1 else f"{detail} {series.name}"
+        to = None if None in days else min(days)
+        if problems:  # complete means without gaps, so stop before the first one
+            to = date.fromisoformat(min(problems)) - timedelta(days=1)
+        result[group] = {
+            "to": None if to is None else to.isoformat(),
+            "due": horizon(members[0], now).isoformat(),
+            "problems": problems,
+        }
+    return result
