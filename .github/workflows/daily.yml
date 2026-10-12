@@ -1,9 +1,13 @@
 name: daily
 
 # One linear run: land SMARD in bronze, merge silver, build gold with dbt, export to S3.
-# Day-ahead prices for tomorrow are published early afternoon in Germany.
+# Twice a day: the morning run picks up yesterday's actuals and today's forecasts; the
+# afternoon run tomorrow's day-ahead prices, published early afternoon in Germany. Two runs
+# also time SMARD's publications to within about 12 hours. Minute 17 avoids the top-of-hour
+# rush on GitHub's scheduler.
 on:
   schedule:
+    - cron: "17 5 * * *"
     - cron: "17 15 * * *"
   workflow_dispatch:
 
