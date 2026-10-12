@@ -1,7 +1,11 @@
 # Daily pipeline
 
-`.github/workflows/daily.yml` runs once a day at 15:17 UTC, after the day-ahead auction results
-are out, and can be started by hand:
+`.github/workflows/daily.yml` runs twice a day and can be started by hand:
+
+- **05:17 UTC**: yesterday's actuals and today's forecasts
+- **15:17 UTC**: tomorrow's day-ahead prices, out after the auction early in the afternoon
+
+Each run:
 
 1. **land bronze**: the latest two weekly SMARD chunks of every series into the landing volume
 2. **merge silver**: deploys the asset bundle (`-t prod`) and runs `silver_smard`
@@ -52,7 +56,7 @@ The last step (`python -m spotgrid_lakehouse.monitoring`) runs after failures to
 | Channel | When | What |
 |---|---|---|
 | Actions run summary | Every run | Step results and times, chunks landed with their local days, silver rows added and changed, dbt results, export, API check, irregularities |
-| Telegram | Every run | A short digest, plus a note when an issue opens or closes |
+| Telegram | Afternoon and manual runs; the morning run only on a problem | A digest (pipeline, completeness per series group, tomorrow's prices, API, open issues), plus a note when an issue opens or closes |
 | GitHub issues | On a problem | `incident`: the run failed, closed by the next good run. `data-quality`: one issue per problem, closed when it is gone, with how long each day was affected |
 | GitHub email | On a problem | GitHub's notifications for those issues and for failed runs |
 
