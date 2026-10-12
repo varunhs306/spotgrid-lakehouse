@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Protocol
 
@@ -43,6 +43,10 @@ class Change:
     action: str  # opened or closed
     title: str
     url: str
+    number: int
+    label: str
+    # Local day -> the problem when opened, or how long it lasted when closed.
+    days: dict[str, str] = field(default_factory=dict)
     detail: str = ""
 
 
@@ -107,22 +111,34 @@ def sync_findings(
             issue = issues.create(
                 finding["title"], finding_body(finding, state, run_url), DATA_QUALITY
             )
-            changes.append(Change("opened", finding["title"], issue["html_url"], days(state)))
+            problems = {day: entry["detail"] for day, entry in state.items()}
+            opened = Change(
+                "opened",
+                finding["title"],
+                issue["html_url"],
+                issue["number"],
+                DATA_QUALITY,
+                problems,
+            )
+            changes.append(opened)
         elif state != old:
             notes = []
             if added := sorted(state.keys() - old.keys()):
                 notes.append(f"New: {', '.join(f'{d} ({state[d]["detail"]})' for d in added)}")
             if gone := resolved(old, state.keys(), now):
-                notes.append(f"Resolved: {gone}")
+                notes.append(f"Resolved: {listing(gone)}")
             if notes:
                 issues.comment(issue["number"], "\n\n".join(notes) + f"\n\nRun: {run_url}")
             issues.edit(issue["number"], finding_body(finding, state, run_url))
         links[finding["key"]] = issue["html_url"]
 
     for issue in existing.values():
-        detail = resolved(state_of(issue), set(), now)
-        issues.close(issue["number"], f"Resolved: {detail}\n\nRun: {run_url}")
-        changes.append(Change("closed", issue["title"], issue["html_url"], detail))
+        gone = resolved(state_of(issue), set(), now)
+        issues.close(issue["number"], f"Resolved: {listing(gone)}\n\nRun: {run_url}")
+        closed = Change(
+            "closed", issue["title"], issue["html_url"], issue["number"], DATA_QUALITY, gone
+        )
+        changes.append(closed)
     return changes, links
 
 
@@ -136,7 +152,15 @@ def sync_incident(
             return []
         down = since(datetime.fromisoformat(current["created_at"]), now)
         issues.close(current["number"], f"Recovered after {down}.\n\nRun: {run_url}")
-        return [Change("closed", current["title"], current["html_url"], f"after {down}")]
+        recovered = Change(
+            "closed",
+            current["title"],
+            current["html_url"],
+            current["number"],
+            INCIDENT,
+            detail=f"after {down}",
+        )
+        return [recovered]
     if current is not None:
         issues.comment(current["number"], f"Failed again at **{failed_step}**.\n\nRun: {run_url}")
         return []
@@ -153,20 +177,20 @@ def sync_incident(
         ]
     )
     issue = issues.create(title, body, INCIDENT)
-    return [Change("opened", title, issue["html_url"])]
+    return [Change("opened", title, issue["html_url"], issue["number"], INCIDENT)]
 
 
-def days(state: dict) -> str:
-    return ", ".join(f"{day} {entry['detail']}" for day, entry in sorted(state.items()))
-
-
-def resolved(old: dict, still_open: set[str], now: datetime) -> str:
+def resolved(old: dict, still_open: set[str], now: datetime) -> dict[str, str]:
     """Days no longer affected, with how long each one was."""
-    return ", ".join(
-        f"{day} after {since(datetime.fromisoformat(entry['since']), now)}"
+    return {
+        day: f"after {since(datetime.fromisoformat(entry['since']), now)}"
         for day, entry in sorted(old.items())
         if day not in still_open
-    )
+    }
+
+
+def listing(days: dict[str, str]) -> str:
+    return ", ".join(f"{day} {text}" for day, text in days.items())
 
 
 class GitHubIssues:
