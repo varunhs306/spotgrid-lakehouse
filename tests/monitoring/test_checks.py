@@ -89,3 +89,10 @@ def test_only_price_revisions_are_flagged():
         ("revised:PRICE_DE_LU", {"2026-10-09": "3 h changed"})
     ]
     assert price_revisions([(410, date(2026, 10, 9), 40)]) == []
+
+
+def test_winter_run_still_expects_tomorrows_prices():
+    # 15:17 UTC is 16:17 in Berlin under CET.
+    winter = datetime(2026, 12, 7, 15, 17, tzinfo=UTC)
+
+    assert horizon(Series.PRICE_DE_LU, winter) == date(2026, 12, 8)
