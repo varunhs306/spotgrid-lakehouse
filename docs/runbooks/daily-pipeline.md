@@ -42,7 +42,36 @@ gh run watch
    gh secret set DATABRICKS_CLIENT_SECRET
    gh variable set SERVING_BUCKET --body "$(terraform -chdir=infra output -raw serving_bucket)"
    gh variable set AWS_EXPORT_ROLE_ARN --body "$(terraform -chdir=infra output -raw export_role_arn)"
+   gh variable set API_URL --body "$(terraform -chdir=infra output -raw api_url)"
    ```
+
+## Monitoring
+
+The last step (`python -m spotgrid_lakehouse.monitoring`) runs after failures too.
+
+| Channel | When | What |
+|---|---|---|
+| Actions run summary | Every run | Step results and times, chunks landed with their local days, silver rows added and changed, dbt results, export, API check, irregularities |
+| Telegram | Every run | A short digest, plus a note when an issue opens or closes |
+| GitHub issues | On a problem | `incident`: the run failed, closed by the next good run. `data-quality`: one issue per problem, closed when it is gone, with how long each day was affected |
+| GitHub email | On a problem | GitHub's notifications for those issues and for failed runs |
+
+Data-quality checks, on the 14 local days the run re-fetches:
+
+| Check | Rule |
+|---|---|
+| Missing hours | Actuals complete up to yesterday, forecasts up to today, day-ahead prices up to tomorrow from 16:00 Berlin time. Days have 23, 24 or 25 hours |
+| Changed prices | Any published day-ahead price that changed; they are final once the auction is out |
+
+Data-quality issues only change after a successful run, so a failed run cannot close them.
+Try it locally without alerting anyone:
+
+```sh
+DATABRICKS_HTTP_PATH=/sql/1.0/warehouses/<id> API_URL=<api url>   uv run python -m spotgrid_lakehouse.monitoring --started-at <UTC time> --profile spotlake --dry-run
+```
+
+Telegram needs `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` as repository secrets (bot from
+@BotFather; your chat id from @userinfobot). Without them the step skips Telegram.
 
 ## When a step fails
 
