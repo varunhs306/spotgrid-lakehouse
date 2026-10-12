@@ -3,6 +3,7 @@ from datetime import UTC, date, datetime, timedelta
 import pytest
 
 from spotgrid_lakehouse.monitoring.checks import (
+    completeness,
     horizon,
     hours_in_day,
     missing_hours,
@@ -96,3 +97,25 @@ def test_winter_run_still_expects_tomorrows_prices():
     winter = datetime(2026, 12, 7, 15, 17, tzinfo=UTC)
 
     assert horizon(Series.PRICE_DE_LU, winter) == date(2026, 12, 8)
+
+
+def test_completeness_by_group():
+    rows = [
+        (s, d, 16 if (s, d) == (410, date(2026, 10, 11)) else h)
+        for s, d, h in complete(AFTERNOON)
+        if (s, d) != (4169, date(2026, 10, 10))
+    ]
+
+    groups = completeness(rows, missing_hours(rows, AFTERNOON), AFTERNOON)
+
+    assert groups["Prices"] == {
+        "to": "2026-10-09",
+        "due": "2026-10-13",
+        "problems": {"2026-10-10": "0/24 h"},
+    }
+    assert groups["Actuals"] == {
+        "to": "2026-10-10",
+        "due": "2026-10-11",
+        "problems": {"2026-10-11": "16/24 h LOAD"},
+    }
+    assert groups["Forecasts"]["problems"] == {}

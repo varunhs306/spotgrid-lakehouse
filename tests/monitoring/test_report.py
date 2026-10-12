@@ -161,11 +161,26 @@ def test_check_api():
 
     http = httpx.Client(transport=httpx.MockTransport(handler))
 
-    result = check_api("https://api.example/", http)
+    result = check_api("https://api.example/", http=http)
 
     assert result["ok"] is True
     assert result["age_minutes"] == 5
+    assert result["tomorrow"] is None
     assert check_api(None) is None
+
+
+def test_check_api_reads_tomorrows_prices():
+    def handler(request):
+        if request.url.path == "/v1/prices/daily":
+            assert request.url.params["start"] == "2026-10-13"
+            return httpx.Response(200, json={"rows": [{"avg_price_eur_mwh": 197.2}]})
+        return httpx.Response(200, json={"age_minutes": 0})
+
+    http = httpx.Client(transport=httpx.MockTransport(handler))
+
+    result = check_api("https://api.example", date(2026, 10, 13), http)
+
+    assert result["tomorrow"] == {"avg_price_eur_mwh": 197.2}
 
 
 def test_check_api_unreachable():
@@ -174,4 +189,4 @@ def test_check_api_unreachable():
 
     http = httpx.Client(transport=httpx.MockTransport(handler))
 
-    assert check_api("https://api.example", http) == {"ok": False, "error": "ConnectError"}
+    assert check_api("https://api.example", http=http) == {"ok": False, "error": "ConnectError"}

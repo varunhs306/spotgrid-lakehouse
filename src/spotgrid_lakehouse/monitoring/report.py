@@ -18,6 +18,7 @@ import httpx
 from spotgrid_lakehouse.monitoring.checks import (
     WINDOW_DAYS,
     Finding,
+    completeness,
     missing_hours,
     price_revisions,
 )
@@ -82,22 +83,32 @@ def silver_summary(changes: list[dict]) -> list[dict]:
     ]
 
 
-def check_api(url: str | None, http: httpx.Client | None = None) -> dict | None:
-    """The public freshness endpoint, as a reviewer would see it."""
+def check_api(
+    url: str | None, tomorrow: date | None = None, http: httpx.Client | None = None
+) -> dict | None:
+    """The public API as a reviewer would see it: freshness, and tomorrow's prices if out."""
     if not url:
         return None
     http = http or httpx.Client(timeout=30)
+    base = url.rstrip("/")
     started = time.monotonic()
     try:
-        response = http.get(f"{url.rstrip('/')}/v1/freshness")
+        response = http.get(f"{base}/v1/freshness")
+        ms = round((time.monotonic() - started) * 1000)
+        day = None
+        if response.status_code == 200 and tomorrow is not None:
+            params = {"start": tomorrow.isoformat(), "end": tomorrow.isoformat()}
+            rows = http.get(f"{base}/v1/prices/daily", params=params).json().get("rows", [])
+            day = rows[0] if rows else None
     except httpx.HTTPError as exc:
         return {"ok": False, "error": type(exc).__name__}
     body = response.json() if response.status_code == 200 else {}
     return {
         "ok": response.status_code == 200,
         "status": response.status_code,
-        "ms": round((time.monotonic() - started) * 1000),
+        "ms": ms,
         "age_minutes": body.get("age_minutes"),
+        "tomorrow": day,
     }
 
 
@@ -124,9 +135,11 @@ def build(
         failed = "API check"
 
     findings: list[Finding] = []
+    complete = None
     if coverage is not None:
         rows = [(r["series_id"], r["local_date"], r["hours"]) for r in coverage]
         findings += missing_hours(rows, now)
+        complete = completeness(rows, findings, now)
     if silver_changes is not None:
         findings += price_revisions(
             (r["series_id"], r["local_date"], r["revised"]) for r in silver_changes
@@ -146,6 +159,7 @@ def build(
         "dbt": dbt,
         "export": manifest,
         "api": api,
+        "complete": complete,
         "findings": [asdict(f) for f in findings],
     }
 
