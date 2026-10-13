@@ -1,4 +1,4 @@
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 
 from pyspark.sql import functions as F
 
@@ -38,3 +38,19 @@ def test_local_day_starts_at_23_utc_in_winter(spark):
         ("2026-01-14T22:00", date(2026, 1, 14)),
         ("2026-01-14T23:00", date(2026, 1, 15)),
     ]
+
+
+def hours_on(spark, day: date, first_utc: str, hours: int) -> int:
+    start = datetime.fromisoformat(first_utc)
+    slots = [(start + timedelta(hours=h)).isoformat(timespec="minutes") for h in range(hours)]
+    return sum(local == day for _, local in times(spark, *slots))
+
+
+def test_spring_forward_day_has_23_hours(spark):
+    # 2026-03-29 runs from 2026-03-28T23:00 to 2026-03-29T22:00 UTC.
+    assert hours_on(spark, date(2026, 3, 29), "2026-03-28T22:00", 26) == 23
+
+
+def test_fall_back_day_has_25_hours(spark):
+    # 2025-10-26 runs from 2025-10-25T22:00 to 2025-10-26T23:00 UTC.
+    assert hours_on(spark, date(2025, 10, 26), "2025-10-25T21:00", 28) == 25
