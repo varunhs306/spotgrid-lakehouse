@@ -31,6 +31,20 @@ models:
               arguments:
                 values: ["hour"]
 
+  - name: quarterhour_features
+    description: >
+      One row per UTC quarter-hour since 2025-10-01, the first day of 15-minute day-ahead
+      prices. Volumes are MWh per quarter-hour. Bundesnetzagentur | SMARD.de (CC BY 4.0).
+    columns:
+      - name: ts_utc
+        description: Quarter-hour start
+        data_tests: [unique, not_null]
+      - name: local_date
+        description: Quarter-hour start date in Europe/Berlin
+        data_tests: [not_null]
+      - name: price_eur_mwh
+        description: Day-ahead price, bidding zone DE-LU
+
   - name: daily_price_summary
     description: Day-ahead price statistics per German local day.
     columns:
