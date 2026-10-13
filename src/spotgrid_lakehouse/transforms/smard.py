@@ -11,6 +11,7 @@ from pyspark.sql import functions as F
 from spotgrid_lakehouse.landing.volume import LANDING_ROOT
 
 SILVER_TABLE = "workspace.silver.smard_timeseries"
+REBUILD_TABLE = "workspace.silver.smard_timeseries_rebuild"
 # The JSON body of one chunk file; meta_data is not needed downstream.
 CHUNK_SCHEMA = "series ARRAY<ARRAY<DOUBLE>>"
 # Chunk files start with the series id; this skips _manifest.json and _index.json.
@@ -120,6 +121,42 @@ def latest_per_slot(rows: DataFrame) -> DataFrame:
     )
 
 
+def rebuild_rows(rows: DataFrame) -> DataFrame:
+    """Silver rows from every landing of each slot, as successive MERGEs would leave them."""
+    by_landing = Window.partitionBy(*KEY).orderBy("fetched_at")
+    previous = F.lag("value").over(by_landing)
+    changes = rows.withColumn("_previous", previous).where(
+        F.col("_previous").isNull() | (F.col("value") != F.col("_previous"))
+    )
+    return changes.groupBy(*KEY).agg(
+        F.min("local_date").alias("local_date"),
+        F.max_by("value", "fetched_at").alias("value"),
+        F.min("fetched_at").alias("first_seen_at"),
+        F.max("fetched_at").alias("last_changed_at"),
+        (F.count("*") - 1).cast("int").alias("revision_count"),
+    )
+
+
+def rebuild(spark: SparkSession, root: str = LANDING_ROOT, table: str = REBUILD_TABLE) -> None:
+    """Replace `table` with silver replayed from every chunk in bronze."""
+    spark.conf.set("spark.sql.session.timeZone", "UTC")
+    rows = rebuild_rows(with_time_columns(parse_chunks(read_chunks(spark, root))))
+    spark.sql(f"DROP TABLE IF EXISTS {table}")
+    spark.sql(SILVER_DDL.format(table=table))
+    rows.select(*spark.table(table).columns).writeTo(table).append()
+
+
+def differences(spark: SparkSession, left: str, right: str) -> dict:
+    """Slots whose value differs between two silver tables, and rows whose lineage differs."""
+
+    def mismatched(columns: str) -> int:
+        a = f"SELECT {columns} FROM {left}"
+        b = f"SELECT {columns} FROM {right}"
+        return spark.sql(f"({a} EXCEPT ALL {b}) UNION ALL ({b} EXCEPT ALL {a})").count()
+
+    return {"values": mismatched(", ".join([*KEY, "value"])), "rows": mismatched("*")}
+
+
 def merge_into_silver(updates: DataFrame, table: str = SILVER_TABLE) -> dict:
     """Upsert into the Delta table, creating it on first use. Returns the MERGE metrics."""
     spark = updates.sparkSession
@@ -148,10 +185,23 @@ def main(argv: list[str] | None = None) -> None:
         "--lookback-days", default=3, type=int, help="chunks landed in the last N days"
     )
     window.add_argument("--all", action="store_true", help="every chunk in bronze")
+    window.add_argument(
+        "--rebuild", action="store_true", help="replace --table with a replay of all of bronze"
+    )
     parser.add_argument("--root", default=LANDING_ROOT)
     parser.add_argument("--table", default=SILVER_TABLE)
+    parser.add_argument("--compare-with", help="after --rebuild, fail if values differ from this")
     args = parser.parse_args(argv)
 
+    spark = SparkSession.builder.getOrCreate()
+    if args.rebuild:
+        rebuild(spark, args.root, args.table)
+        if args.compare_with:
+            diffs = differences(spark, args.table, args.compare_with)
+            print(f"differing values={diffs['values']} rows={diffs['rows']}")
+            if diffs["values"]:
+                raise SystemExit(f"{args.table} and {args.compare_with} hold different values")
+        return
     lookback = None if args.all else timedelta(days=args.lookback_days)
-    metrics = run(SparkSession.builder.getOrCreate(), args.root, args.table, lookback)
+    metrics = run(spark, args.root, args.table, lookback)
     print(" ".join(f"{k}={v}" for k, v in metrics.items()))

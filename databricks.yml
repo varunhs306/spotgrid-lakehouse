@@ -30,6 +30,26 @@ resources:
             environment_version: "4"
             dependencies:
               - ./dist/*.whl
+    # Run by hand: replays all of bronze into a side table and fails if it disagrees with silver.
+    silver_rebuild:
+      name: silver_rebuild
+      tasks:
+        - task_key: rebuild
+          environment_key: default
+          spark_python_task:
+            python_file: jobs/silver_smard.py
+            parameters:
+              - --rebuild
+              - --table
+              - workspace.silver.smard_timeseries_rebuild
+              - --compare-with
+              - workspace.silver.smard_timeseries
+      environments:
+        - environment_key: default
+          spec:
+            environment_version: "4"
+            dependencies:
+              - ./dist/*.whl
 
 targets:
   dev:
