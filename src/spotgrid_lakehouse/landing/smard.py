@@ -102,28 +102,47 @@ def _dump(document: dict) -> bytes:
     return json.dumps(document, indent=2, sort_keys=True).encode()
 
 
+def local_week_start(ms: int) -> date:
+    """Local Berlin day a weekly chunk starts on; chunks start at Monday midnight."""
+    return datetime.fromtimestamp(ms / 1000, BERLIN).date()
+
+
+def select_chunks(
+    starts: list[int], weeks: int = 2, since: date | None = None, until: date | None = None
+) -> list[int]:
+    """The latest `weeks` chunks, or with `since`, every chunk whose week overlaps since..until."""
+    if since is None:
+        return starts[-weeks:]
+    return [
+        s
+        for s in starts
+        if local_week_start(s) + timedelta(days=6) >= since
+        and (until is None or local_week_start(s) <= until)
+    ]
+
+
 def chunk_dates(starts: list[int]) -> tuple[str, str] | None:
     """First and last local day covered by weekly chunks starting at `starts` (epoch ms)."""
     if not starts:
         return None
-
-    def local_day(ms: int):
-        return datetime.fromtimestamp(ms / 1000, BERLIN).date()
-
-    return local_day(min(starts)).isoformat(), (
-        local_day(max(starts)) + timedelta(days=6)
-    ).isoformat()
+    first, last = local_week_start(min(starts)), local_week_start(max(starts))
+    return first.isoformat(), (last + timedelta(days=6)).isoformat()
 
 
 def main(argv: list[str] | None = None) -> None:
-    parser = argparse.ArgumentParser(description="Land recent SMARD chunks in the bronze volume.")
+    parser = argparse.ArgumentParser(description="Land SMARD chunks in the bronze volume.")
     parser.add_argument(
         "--series", nargs="+", default=list(Series.__members__), choices=Series.__members__
     )
     parser.add_argument("--resolution", nargs="+", default=[Resolution.HOUR], type=Resolution)
-    parser.add_argument(
+    window = parser.add_mutually_exclusive_group()
+    window.add_argument(
         "--weeks", default=2, type=int, help="latest N weekly chunks, current one included"
     )
+    window.add_argument(
+        "--since", type=date.fromisoformat, help="backfill: every chunk from this local day"
+    )
+    parser.add_argument("--until", type=date.fromisoformat, help="backfill: last local day")
     parser.add_argument("--root", default=LANDING_ROOT)
     parser.add_argument("--profile", help="Databricks config profile; default auth chain if unset")
     parser.add_argument("--report", type=Path, help="write what was landed to this JSON file")
@@ -135,7 +154,9 @@ def main(argv: list[str] | None = None) -> None:
         for name in args.series:
             for resolution in args.resolution:
                 series = Series[name]
-                starts = client.index(series, resolution)[-args.weeks :]
+                starts = select_chunks(
+                    client.index(series, resolution), args.weeks, args.since, args.until
+                )
                 written = land(client, volume, series, resolution, starts)
                 skipped = len(starts) - len(written)
                 print(f"{series.name} {resolution}: wrote {len(written)}, skipped {skipped}")
