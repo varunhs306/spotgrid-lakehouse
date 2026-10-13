@@ -55,7 +55,8 @@ def land(
     Returns the chunk paths written; an unchanged rerun writes nothing.
     """
     region = region or default_region(series)
-    fetch_date = now().date()
+    started = now()
+    fetch_date = started.date()
     folder = landing_dir(series, resolution, fetch_date, region)
     index_path = f"{series_dir(series, resolution, region)}/{INDEX}"
     index = _read_json(volume, index_path) or {"version": INDEX_VERSION, "chunks": {}}
@@ -74,7 +75,10 @@ def land(
         sha256 = hashlib.sha256(raw).hexdigest()
         if index["chunks"].get(str(start), {}).get("sha256") == sha256:
             continue
-        name = chunk_name(series, resolution, start, region)
+        # The landing time in the name keeps every version, even two on the same day.
+        name = chunk_name(series, resolution, start, region).replace(
+            ".json", f"_{started:%H%M%S}.json"
+        )
         volume.write(f"{folder}/{name}", raw)
         written.append(f"{folder}/{name}")
         index["chunks"][str(start)] = {"sha256": sha256, "fetch_date": fetch_date.isoformat()}
