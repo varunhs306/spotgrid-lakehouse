@@ -10,7 +10,7 @@ FIXTURES = Path(__file__).parents[1] / "fixtures" / "smard"
 WEEK_2026_09_28 = 1790546400000
 NOW = datetime(2026, 10, 7, 5, 30, tzinfo=UTC)
 FOLDER = "smard/4169/DE-LU/hour/fetch_date=2026-10-07"
-NAME = f"4169_DE-LU_hour_{WEEK_2026_09_28}.json"
+NAME = f"4169_DE-LU_hour_{WEEK_2026_09_28}_053000.json"
 RAW = (FIXTURES / chunk_path(Series.PRICE_DE_LU, Resolution.HOUR, WEEK_2026_09_28)).read_bytes()
 
 
@@ -36,7 +36,7 @@ def test_manifest_records_checksum_and_source_url(client, volume):
         "chunk_start_ms": WEEK_2026_09_28,
         "sha256": hashlib.sha256(RAW).hexdigest(),
         "bytes": len(RAW),
-        "source_url": f"https://smard.test/app/chart_data/4169/DE-LU/{NAME}",
+        "source_url": f"https://smard.test/app/chart_data/4169/DE-LU/4169_DE-LU_hour_{WEEK_2026_09_28}.json",
         "fetched_at": "2026-10-07T05:30:00+00:00",
     }
 

@@ -49,6 +49,9 @@ def client(upstream):
         yield client
 
 
+FOLDER_2 = "smard/4169/DE-LU/hour/fetch_date=2026-10-08"
+
+
 def run(client, volume, now):
     return land(client, volume, Series.PRICE_DE_LU, Resolution.HOUR, [WEEK], now=lambda: now)
 
@@ -68,9 +71,20 @@ def test_revised_chunk_lands_again_under_new_fetch_date(client, volume, upstream
 
     written = run(client, volume, DAY_2)
 
-    assert written == [f"smard/4169/DE-LU/hour/fetch_date=2026-10-08/4169_DE-LU_hour_{WEEK}.json"]
+    assert written == [f"{FOLDER_2}/4169_DE-LU_hour_{WEEK}_{DAY_2:%H%M%S}.json"]
     assert volume.files[written[0]] == upstream.body
     assert run(client, volume, DAY_2) == []
+
+
+def test_same_day_revision_keeps_both_versions(client, volume, upstream):
+    morning, afternoon = DAY_2.replace(hour=5), DAY_2.replace(hour=15)
+    first = run(client, volume, morning)
+    upstream.body = b'{"series": [[1790546400000, 81.5]]}'
+
+    second = run(client, volume, afternoon)
+
+    assert first != second
+    assert volume.files[first[0]] != volume.files[second[0]]
 
 
 @pytest.mark.parametrize("fail_on", [".json", "_manifest.json", "_index.json"])
