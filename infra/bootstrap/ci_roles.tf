@@ -92,6 +92,12 @@ data "aws_iam_policy_document" "ci_read" {
   }
 
   statement {
+    sid       = "ReadSchedules"
+    actions   = ["scheduler:GetSchedule"]
+    resources = ["${format(local.arn_prefix, "scheduler")}:schedule/default/spotgrid-*"]
+  }
+
+  statement {
     sid       = "ReadAlarms"
     actions   = ["cloudwatch:ListTagsForResource"]
     resources = ["${format(local.arn_prefix, "cloudwatch")}:alarm:spotgrid-*"]
@@ -127,6 +133,12 @@ data "aws_iam_policy_document" "ci_write" {
     sid       = "ManageLogs"
     actions   = ["logs:*"]
     resources = ["${format(local.arn_prefix, "logs")}:log-group:/aws/lambda/spotgrid-*"]
+  }
+
+  statement {
+    sid       = "ManageSchedules"
+    actions   = ["scheduler:CreateSchedule", "scheduler:UpdateSchedule", "scheduler:DeleteSchedule"]
+    resources = ["${format(local.arn_prefix, "scheduler")}:schedule/default/spotgrid-*"]
   }
 
   statement {
@@ -169,14 +181,14 @@ data "aws_iam_policy_document" "ci_write" {
   }
 
   statement {
-    sid       = "PassRoleToLambda"
+    sid       = "PassRoleToServices"
     actions   = ["iam:PassRole"]
     resources = [local.workload_role]
 
     condition {
       test     = "StringEquals"
       variable = "iam:PassedToService"
-      values   = ["lambda.amazonaws.com"]
+      values   = ["lambda.amazonaws.com", "scheduler.amazonaws.com"]
     }
   }
 
@@ -195,7 +207,7 @@ data "aws_iam_policy_document" "ci_write" {
   }
 }
 
-# Ceiling for every role the apply role creates (Lambda API, export jobs).
+# Ceiling for every role the apply role creates (Lambda API, its warm-up schedule, export jobs).
 data "aws_iam_policy_document" "workload_boundary" {
   statement {
     sid       = "ServingData"
@@ -207,6 +219,12 @@ data "aws_iam_policy_document" "workload_boundary" {
     sid       = "LambdaLogs"
     actions   = ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"]
     resources = ["${format(local.arn_prefix, "logs")}:log-group:/aws/lambda/spotgrid-*"]
+  }
+
+  statement {
+    sid       = "InvokeApi"
+    actions   = ["lambda:InvokeFunction"]
+    resources = ["${format(local.arn_prefix, "lambda")}:function:spotgrid-api"]
   }
 }
 
