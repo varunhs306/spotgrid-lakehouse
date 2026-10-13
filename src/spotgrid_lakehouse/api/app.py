@@ -137,7 +137,9 @@ def rows(
 router = APIRouter(prefix="/v1")
 
 
-@router.get("/prices", summary="Hourly day-ahead prices, bidding zone DE-LU")
+@router.get(
+    "/prices", summary="Hourly day-ahead prices, bidding zone DE-LU (DE-AT-LU before October 2018)"
+)
 def prices(data: Gold, start: Start = None, end: End = None) -> Rows[PriceRow]:
     return rows(data.table(HOURLY), PriceRow, start, end, MAX_HOURLY_DAYS)
 
