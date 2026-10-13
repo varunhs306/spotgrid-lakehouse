@@ -12,8 +12,14 @@ models:
       - name: local_date
         description: Hour start date in Europe/Berlin
         data_tests: [not_null]
+      - name: price_zone
+        description: Bidding zone of the price, DE-AT-LU until 2018-09-30, DE-LU after
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ["DE-LU", "DE-AT-LU"]
       - name: price_eur_mwh
-        description: Day-ahead price, bidding zone DE-LU
+        description: Day-ahead price in price_zone
       - name: load_mwh
         description: Grid load
       - name: residual_load_mwh
