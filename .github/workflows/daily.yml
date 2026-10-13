@@ -48,7 +48,7 @@ jobs:
         name: land bronze
         run: >-
           uv run --no-dev python -m spotgrid_lakehouse.landing.smard --weeks 2
-          --report "$RUNNER_TEMP/landing.json"
+          --resolution hour quarterhour --report "$RUNNER_TEMP/landing.json"
 
       - id: silver
         name: merge silver
