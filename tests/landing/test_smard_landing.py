@@ -1,9 +1,9 @@
 import hashlib
 import json
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 
-from spotgrid_lakehouse.landing.smard import chunk_dates, land
+from spotgrid_lakehouse.landing.smard import chunk_dates, land, select_chunks
 from spotgrid_lakehouse.sources.smard import Resolution, Series, chunk_path
 
 FIXTURES = Path(__file__).parents[1] / "fixtures" / "smard"
@@ -64,3 +64,22 @@ def test_chunk_dates_span_local_weeks():
     # Weekly chunks start at local midnight on Monday: 2026-09-28 and 2026-10-05.
     assert chunk_dates([1791151200000, WEEK_2026_09_28]) == ("2026-09-28", "2026-10-11")
     assert chunk_dates([]) is None
+
+
+WEEK_2026_10_05 = 1791151200000
+WEEK_2026_10_12 = 1791756000000
+
+
+def test_select_latest_weeks():
+    starts = [WEEK_2026_09_28, WEEK_2026_10_05, WEEK_2026_10_12]
+    assert select_chunks(starts, weeks=2) == [WEEK_2026_10_05, WEEK_2026_10_12]
+
+
+def test_select_weeks_overlapping_a_date_range():
+    starts = [WEEK_2026_09_28, WEEK_2026_10_05, WEEK_2026_10_12]
+    # Sunday 4 Oct is the last day of the first week; Monday 5 Oct starts the second.
+    assert select_chunks(starts, since=date(2026, 10, 4), until=date(2026, 10, 5)) == [
+        WEEK_2026_09_28,
+        WEEK_2026_10_05,
+    ]
+    assert select_chunks(starts, since=date(2026, 10, 5)) == [WEEK_2026_10_05, WEEK_2026_10_12]
