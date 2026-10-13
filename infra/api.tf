@@ -128,3 +128,62 @@ resource "aws_lambda_permission" "api_invoke" {
   principal                = "*"
   invoked_via_function_url = true
 }
+
+# EventBridge Scheduler invokes the function directly every 5 minutes, keeping one container
+# warm with the latest tables loaded. About 8,600 invocations a month, inside both free tiers.
+data "aws_iam_policy_document" "scheduler_trust" {
+  statement {
+    actions = ["sts:AssumeRole"]
+
+    principals {
+      type        = "Service"
+      identifiers = ["scheduler.amazonaws.com"]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:SourceAccount"
+      values   = [local.account_id]
+    }
+  }
+}
+
+resource "aws_iam_role" "api_warmup" {
+  name                 = "${local.api_name}-warmup"
+  assume_role_policy   = data.aws_iam_policy_document.scheduler_trust.json
+  permissions_boundary = local.workload_boundary
+}
+
+data "aws_iam_policy_document" "api_warmup" {
+  statement {
+    actions   = ["lambda:InvokeFunction"]
+    resources = [aws_lambda_function.api.arn]
+  }
+}
+
+resource "aws_iam_role_policy" "api_warmup" {
+  name   = "invoke-api"
+  role   = aws_iam_role.api_warmup.id
+  policy = data.aws_iam_policy_document.api_warmup.json
+}
+
+resource "aws_scheduler_schedule" "api_warmup" {
+  #checkov:skip=CKV_AWS_297:The schedule holds a constant payload; a customer-managed KMS key costs 1 USD a month
+  name                = "${local.api_name}-warmup"
+  schedule_expression = "rate(5 minutes)"
+
+  flexible_time_window {
+    mode = "OFF"
+  }
+
+  target {
+    arn      = aws_lambda_function.api.arn
+    role_arn = aws_iam_role.api_warmup.arn
+    input    = jsonencode({ warmup = true })
+
+    # A missed ping costs one slow request at worst; the next one is 5 minutes away.
+    retry_policy {
+      maximum_retry_attempts = 0
+    }
+  }
+}
