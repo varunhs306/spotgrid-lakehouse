@@ -61,6 +61,11 @@ class GoldData:
         self._tables[name] = (entry["sha256"], table)
         return table
 
+    def warm(self) -> None:
+        """Load every exported table, so the next request is served from memory."""
+        for name in self.manifest()["tables"]:
+            self.table(name)
+
 
 class S3Source:
     def __init__(self, bucket: str) -> None:

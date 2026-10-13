@@ -250,3 +250,25 @@ def test_lambda_handler_serves_a_function_url_event(bucket):
 
     assert response["statusCode"] == 200
     assert '"local_date":"2026-10-10"' in response["body"]
+
+
+@pytest.fixture
+def make_handler(monkeypatch):
+    monkeypatch.setenv("SERVING_BUCKET", "unused")
+    monkeypatch.setenv("AWS_DEFAULT_REGION", "us-east-1")
+    from spotgrid_lakehouse.api import lambda_handler
+
+    return lambda_handler.make_handler
+
+
+def test_warmup_loads_every_table(bucket, make_handler):
+    assert make_handler(GoldData(bucket))({"warmup": True}, None) == {"warm": True}
+    assert sorted(bucket.gets) == [
+        MANIFEST_KEY,
+        "gold/daily_price_summary.parquet",
+        "gold/hourly_features.parquet",
+    ]
+
+
+def test_warmup_without_an_export_does_not_fail(make_handler):
+    assert make_handler(GoldData(Bucket()))({"warmup": True}, None) == {"warm": False}
