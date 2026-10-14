@@ -16,6 +16,7 @@ artifacts:
 
 resources:
   jobs:
+    # Once, by hand: --python-params --revisions-from-bronze logs the revisions bronze holds.
     silver_smard:
       name: silver_smard
       tasks:
