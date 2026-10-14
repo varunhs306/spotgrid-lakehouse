@@ -4,10 +4,12 @@ name: daily
 # Twice a day: the morning run picks up yesterday's actuals and today's forecasts; the
 # afternoon run tomorrow's day-ahead prices, published early afternoon in Germany. Two runs
 # also time SMARD's publications to within about 12 hours. Minute 17 avoids the top-of-hour
-# rush on GitHub's scheduler.
+# rush on GitHub's scheduler. SMARD revises values months later, so the Sunday morning run
+# re-lands the last year instead of the last two weeks.
 on:
   schedule:
-    - cron: "17 5 * * *"
+    - cron: "17 5 * * 1-6"
+    - cron: "17 5 * * 0"
     - cron: "17 15 * * *"
   workflow_dispatch:
 
@@ -47,7 +49,8 @@ jobs:
       - id: land
         name: land bronze
         run: >-
-          uv run --no-dev python -m spotgrid_lakehouse.landing.smard --weeks 2
+          uv run --no-dev python -m spotgrid_lakehouse.landing.smard
+          --weeks ${{ github.event.schedule == '17 5 * * 0' && 53 || 2 }}
           --resolution hour quarterhour --report "$RUNNER_TEMP/landing.json"
 
       - id: silver
