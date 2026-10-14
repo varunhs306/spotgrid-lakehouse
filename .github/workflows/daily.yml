@@ -92,3 +92,9 @@ jobs:
           --outcome "merge silver=${{ steps.silver.outcome }}"
           --outcome "build gold=${{ steps.gold.outcome }}"
           --outcome "export=${{ steps.export.outcome }}"
+
+      # Free Edition can't lower the warehouse's 10-minute auto-stop; idle time was about
+      # two thirds of its cost. Last, so the report's queries are done.
+      - name: stop warehouse
+        if: always()
+        run: databricks warehouses stop "${DATABRICKS_HTTP_PATH##*/}" --no-wait
