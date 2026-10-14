@@ -12,6 +12,7 @@ from spotgrid_lakehouse.landing.volume import LANDING_ROOT
 
 SILVER_TABLE = "workspace.silver.smard_timeseries"
 REBUILD_TABLE = "workspace.silver.smard_timeseries_rebuild"
+REVISIONS_TABLE = "workspace.silver.revisions"
 # The JSON body of one chunk file; meta_data is not needed downstream.
 CHUNK_SCHEMA = "series ARRAY<ARRAY<DOUBLE>>"
 # Chunk files start with the series id; this skips _manifest.json and _index.json.
@@ -52,6 +53,32 @@ WHEN NOT MATCHED THEN INSERT
   VALUES (s.series_id, s.region, s.resolution, s.ts_utc, s.local_date, s.value,
    s.fetched_at, s.fetched_at, 0)
 """
+
+
+REVISIONS_DDL = """
+CREATE TABLE IF NOT EXISTS {table} (
+  series_id INT NOT NULL,
+  region STRING NOT NULL,
+  resolution STRING NOT NULL,
+  ts_utc TIMESTAMP NOT NULL COMMENT 'Slot start',
+  local_date DATE NOT NULL COMMENT 'Slot start date in Europe/Berlin',
+  old_value DOUBLE NOT NULL,
+  new_value DOUBLE NOT NULL,
+  detected_at TIMESTAMP NOT NULL COMMENT 'Landing time of the chunk with the new value'
+)
+USING DELTA
+COMMENT 'One row per change SMARD made to a published value'
+"""
+
+# Keyed on the landing that carried the change, so a rerun or a replay of bronze adds nothing.
+REVISIONS_MERGE_SQL = """
+MERGE INTO {table} AS t
+USING {source} AS s
+ON t.series_id = s.series_id AND t.region = s.region
+  AND t.resolution = s.resolution AND t.ts_utc = s.ts_utc AND t.detected_at = s.detected_at
+WHEN NOT MATCHED THEN INSERT *
+"""
+REVISION_COLUMNS = [*KEY, "local_date", "old_value", "new_value", "detected_at"]
 
 
 def read_chunks(
@@ -121,20 +148,69 @@ def latest_per_slot(rows: DataFrame) -> DataFrame:
     )
 
 
-def rebuild_rows(rows: DataFrame) -> DataFrame:
-    """Silver rows from every landing of each slot, as successive MERGEs would leave them."""
+def _changes(rows: DataFrame) -> DataFrame:
+    """Landings that set a slot's value: its first, and each that differs from the one before.
+    `_previous` holds the value it replaced.
+    """
     by_landing = Window.partitionBy(*KEY).orderBy("fetched_at")
-    previous = F.lag("value").over(by_landing)
-    changes = rows.withColumn("_previous", previous).where(
+    return rows.withColumn("_previous", F.lag("value").over(by_landing)).where(
         F.col("_previous").isNull() | (F.col("value") != F.col("_previous"))
     )
-    return changes.groupBy(*KEY).agg(
-        F.min("local_date").alias("local_date"),
-        F.max_by("value", "fetched_at").alias("value"),
-        F.min("fetched_at").alias("first_seen_at"),
-        F.max("fetched_at").alias("last_changed_at"),
-        (F.count("*") - 1).cast("int").alias("revision_count"),
+
+
+def rebuild_rows(rows: DataFrame) -> DataFrame:
+    """Silver rows from every landing of each slot, as successive MERGEs would leave them."""
+    return (
+        _changes(rows)
+        .groupBy(*KEY)
+        .agg(
+            F.min("local_date").alias("local_date"),
+            F.max_by("value", "fetched_at").alias("value"),
+            F.min("fetched_at").alias("first_seen_at"),
+            F.max("fetched_at").alias("last_changed_at"),
+            (F.count("*") - 1).cast("int").alias("revision_count"),
+        )
     )
+
+
+def revision_history(rows: DataFrame) -> DataFrame:
+    """Every revision in a set of landings, e.g. all of bronze."""
+    return (
+        _changes(rows)
+        .where(F.col("_previous").isNotNull())
+        .withColumnsRenamed(
+            {"_previous": "old_value", "value": "new_value", "fetched_at": "detected_at"}
+        )
+        .select(*REVISION_COLUMNS)
+    )
+
+
+def revised(updates: DataFrame, current: DataFrame) -> DataFrame:
+    """The revisions a batch makes to the current silver rows, by the same rule as MERGE."""
+    s, t = updates.alias("s"), current.alias("t")
+    return (
+        s.join(t, KEY)
+        .where(
+            (F.col("s.value") != F.col("t.value"))
+            & (F.col("s.fetched_at") > F.col("t.last_changed_at"))
+        )
+        .select(
+            *KEY,
+            F.col("s.local_date"),
+            F.col("t.value").alias("old_value"),
+            F.col("s.value").alias("new_value"),
+            F.col("s.fetched_at").alias("detected_at"),
+        )
+    )
+
+
+def log_revisions(revisions: DataFrame, table: str = REVISIONS_TABLE) -> int:
+    """Append new revisions to the log, creating it on first use. Returns rows added."""
+    spark = revisions.sparkSession
+    spark.sql(REVISIONS_DDL.format(table=table))
+    revisions.createOrReplaceTempView("smard_revisions")
+    merged = spark.sql(REVISIONS_MERGE_SQL.format(table=table, source="smard_revisions"))
+    return merged.first()["num_inserted_rows"]
 
 
 def rebuild(spark: SparkSession, root: str = LANDING_ROOT, table: str = REBUILD_TABLE) -> None:
@@ -170,12 +246,19 @@ def run(
     root: str = LANDING_ROOT,
     table: str = SILVER_TABLE,
     lookback: timedelta | None = timedelta(days=3),
+    revisions_table: str = REVISIONS_TABLE,
 ) -> dict:
-    """Merge chunks landed within `lookback` (all of bronze if None) into silver."""
+    """Merge chunks landed within `lookback` (all of bronze if None) into silver, logging
+    each value it changes.
+    """
     spark.conf.set("spark.sql.session.timeZone", "UTC")
     since = datetime.now(UTC) - lookback if lookback is not None else None
-    rows = with_time_columns(parse_chunks(read_chunks(spark, root, since)))
-    return merge_into_silver(latest_per_slot(rows), table)
+    updates = latest_per_slot(with_time_columns(parse_chunks(read_chunks(spark, root, since))))
+    # Logged before the MERGE overwrites the old values; a rerun after a failed MERGE
+    # finds the same revisions and adds nothing.
+    spark.sql(SILVER_DDL.format(table=table))
+    logged = log_revisions(revised(updates, spark.table(table)), revisions_table)
+    return {**merge_into_silver(updates, table), "revisions_logged": logged}
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -188,12 +271,23 @@ def main(argv: list[str] | None = None) -> None:
     window.add_argument(
         "--rebuild", action="store_true", help="replace --table with a replay of all of bronze"
     )
+    window.add_argument(
+        "--revisions-from-bronze",
+        action="store_true",
+        help="log every revision found in all of bronze; safe to repeat",
+    )
     parser.add_argument("--root", default=LANDING_ROOT)
     parser.add_argument("--table", default=SILVER_TABLE)
+    parser.add_argument("--revisions-table", default=REVISIONS_TABLE)
     parser.add_argument("--compare-with", help="after --rebuild, fail if values differ from this")
     args = parser.parse_args(argv)
 
     spark = SparkSession.builder.getOrCreate()
+    if args.revisions_from_bronze:
+        spark.conf.set("spark.sql.session.timeZone", "UTC")
+        rows = with_time_columns(parse_chunks(read_chunks(spark, args.root)))
+        print(f"revisions_logged={log_revisions(revision_history(rows), args.revisions_table)}")
+        return
     if args.rebuild:
         rebuild(spark, args.root, args.table)
         if args.compare_with:
@@ -203,5 +297,5 @@ def main(argv: list[str] | None = None) -> None:
                 raise SystemExit(f"{args.table} and {args.compare_with} hold different values")
         return
     lookback = None if args.all else timedelta(days=args.lookback_days)
-    metrics = run(spark, args.root, args.table, lookback)
+    metrics = run(spark, args.root, args.table, lookback, args.revisions_table)
     print(" ".join(f"{k}={v}" for k, v in metrics.items()))
