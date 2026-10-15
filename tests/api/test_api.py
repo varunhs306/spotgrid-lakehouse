@@ -36,6 +36,27 @@ def hourly() -> pa.Table:
     return pa.table(columns)
 
 
+def quarterhourly() -> pa.Table:
+    quarters = [FIRST_HOUR + timedelta(minutes=15 * q) for q in range(10 * 96)]
+    local_dates = [(ts + timedelta(hours=2)).date() for ts in quarters]
+    return pa.table(
+        {
+            "ts_utc": pa.array(quarters, pa.timestamp("us", tz="UTC")),
+            "local_date": pa.array(local_dates, pa.date32()),
+            "price_eur_mwh": [float(q % 4) for q in range(len(quarters))],
+        }
+    )
+
+
+def tables(**replaced) -> dict[str, pa.Table]:
+    return {
+        "hourly_features": hourly(),
+        "quarterhour_features": quarterhourly(),
+        "daily_price_summary": daily(),
+        **replaced,
+    }
+
+
 def daily() -> pa.Table:
     days = [date(2026, 10, d) for d in range(1, 11)]
     return pa.table(
@@ -80,11 +101,7 @@ def exported_at():
 @pytest.fixture
 def bucket():
     bucket = Bucket()
-    export(
-        Warehouse({"hourly_features": hourly(), "daily_price_summary": daily()}),
-        bucket,
-        now=exported_at,
-    )
+    export(Warehouse(tables()), bucket, now=exported_at)
     return bucket
 
 
@@ -115,6 +132,32 @@ def test_prices_default_to_the_latest_seven_days(client):
         "price_eur_mwh": -2.0,
     }
     assert response.headers["cache-control"] == "public, max-age=300"
+
+
+def test_quarterhour_prices_default_to_the_latest_seven_days(client):
+    body = client.get("/v1/prices/quarterhour").json()
+
+    assert (body["start"], body["end"]) == ("2026-10-04", "2026-10-10")
+    assert len(body["rows"]) == 7 * 96
+    assert body["rows"][1] == {
+        "ts_utc": "2026-10-03T22:15:00Z",
+        "local_date": "2026-10-04",
+        "price_eur_mwh": 1.0,
+    }
+
+
+def test_quarterhour_prices_cap_the_window(client):
+    params = {"start": "2026-01-01", "end": "2026-04-03"}
+
+    assert client.get("/v1/prices/quarterhour", params=params).status_code == 422
+
+
+def test_export_without_quarterhours_is_unavailable(bucket):
+    export(Warehouse(tables()), bucket, {"hourly_features": "ts_utc"})
+    client = TestClient(create_app(GoldData(bucket)))
+
+    assert client.get("/v1/prices/quarterhour").status_code == 503
+    assert client.get("/v1/prices").status_code == 200
 
 
 def test_load_ends_on_the_latest_day_with_actuals(client):
@@ -170,6 +213,7 @@ def test_freshness_reports_the_export_and_how_far_each_table_reaches(client):
         "age_minutes": 150,
         "tables": {
             "hourly_features": {"rows": 240, "max_time": "2026-10-10T21:00:00+00:00"},
+            "quarterhour_features": {"rows": 960, "max_time": "2026-10-10T21:45:00+00:00"},
             "daily_price_summary": {"rows": 10, "max_time": "2026-10-10"},
         },
     }
@@ -209,7 +253,7 @@ def test_new_export_is_picked_up_after_the_ttl(bucket):
     data = GoldData(bucket, ttl=300, clock=clock)
     data.table("daily_price_summary")
     newer = daily().slice(0, 3)
-    export(Warehouse({"hourly_features": hourly(), "daily_price_summary": newer}), bucket)
+    export(Warehouse(tables(daily_price_summary=newer)), bucket)
 
     clock.now = 300
     table = data.table("daily_price_summary")
@@ -222,7 +266,7 @@ def test_unchanged_table_is_not_downloaded_again(bucket):
     clock = Clock()
     data = GoldData(bucket, ttl=300, clock=clock)
     data.table("hourly_features")
-    export(Warehouse({"hourly_features": hourly(), "daily_price_summary": daily()}), bucket)
+    export(Warehouse(tables()), bucket)
 
     clock.now = 300
     data.table("hourly_features")
@@ -267,6 +311,7 @@ def test_warmup_loads_every_table(bucket, make_handler):
         MANIFEST_KEY,
         "gold/daily_price_summary.parquet",
         "gold/hourly_features.parquet",
+        "gold/quarterhour_features.parquet",
     ]
 
 

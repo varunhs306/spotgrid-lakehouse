@@ -50,7 +50,9 @@ class GoldData:
         return self._manifest
 
     def table(self, name: str) -> pa.Table:
-        entry = self.manifest()["tables"][name]
+        entry = self.manifest()["tables"].get(name)
+        if entry is None:  # an export from before the table existed
+            raise NoExport(name)
         cached = self._tables.get(name)
         if cached is not None and cached[0] == entry["sha256"]:
             return cached[1]

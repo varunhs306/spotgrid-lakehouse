@@ -26,7 +26,7 @@ flowchart LR
 ## Live
 
 - API: <https://lrmxrrzm5fqfig7qxtdovjnxju0gxclv.lambda-url.us-east-1.on.aws/docs>
-  - `/v1/prices`, `/v1/prices/daily`, `/v1/load`, `/v1/generation`: `?start=YYYY-MM-DD&end=YYYY-MM-DD`, local dates in Europe/Berlin
+  - `/v1/prices`, `/v1/prices/quarterhour`, `/v1/prices/daily`, `/v1/load`, `/v1/generation`: `?start=YYYY-MM-DD&end=YYYY-MM-DD`, local dates in Europe/Berlin
   - `/v1/freshness`: when the data was last exported and how far it reaches
 - Daily runs: [Actions](https://github.com/varunhs306/spotgrid-lakehouse/actions/workflows/daily.yml)
 
