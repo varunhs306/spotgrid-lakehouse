@@ -22,7 +22,11 @@ import pyarrow.parquet as pq
 
 GOLD_SCHEMA = "workspace.gold"
 # Table -> its time column, which orders the rows.
-TABLES = {"hourly_features": "ts_utc", "daily_price_summary": "local_date"}
+TABLES = {
+    "hourly_features": "ts_utc",
+    "quarterhour_features": "ts_utc",
+    "daily_price_summary": "local_date",
+}
 PREFIX = "gold"
 PARQUET = "application/vnd.apache.parquet"
 MANIFEST_KEY = "_manifest.json"
