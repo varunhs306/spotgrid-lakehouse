@@ -21,9 +21,12 @@ from spotgrid_lakehouse.api.data import GoldData, NoExport
 from spotgrid_lakehouse.export.gold import ATTRIBUTION
 
 HOURLY = "hourly_features"
+QUARTERHOUR = "quarterhour_features"
 DAILY = "daily_price_summary"
 DEFAULT_DAYS = 7
 MAX_HOURLY_DAYS = 366
+# About as many rows as a year of hours.
+MAX_QUARTERHOUR_DAYS = 92
 MAX_DAILY_DAYS = 3660
 # The export runs once a day; five minutes of client caching costs nothing in freshness.
 CACHE_CONTROL = "public, max-age=300"
@@ -142,6 +145,14 @@ router = APIRouter(prefix="/v1")
 )
 def prices(data: Gold, start: Start = None, end: End = None) -> Rows[PriceRow]:
     return rows(data.table(HOURLY), PriceRow, start, end, MAX_HOURLY_DAYS)
+
+
+@router.get(
+    "/prices/quarterhour",
+    summary="Quarter-hourly day-ahead prices, bidding zone DE-LU, from 1 October 2025",
+)
+def quarterhour_prices(data: Gold, start: Start = None, end: End = None) -> Rows[PriceRow]:
+    return rows(data.table(QUARTERHOUR), PriceRow, start, end, MAX_QUARTERHOUR_DAYS)
 
 
 @router.get("/prices/daily", summary="Daily min, mean and max price and negative-price hours")
