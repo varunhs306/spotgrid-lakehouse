@@ -15,8 +15,9 @@ from spotgrid_lakehouse.sources.smard import Series
 BERLIN = ZoneInfo("Europe/Berlin")
 # Matches the landing re-fetch window: older gaps can no longer be filled by the daily run.
 WINDOW_DAYS = 14
-# Day-ahead results are out shortly after 13:00 and reach SMARD in the afternoon. The daily run
-# (15:17 UTC) is at 17:17 in summer and 16:17 in winter, so both check tomorrow's prices.
+# Day-ahead results are out shortly after 13:00 and reach SMARD in the afternoon. The last
+# afternoon run (17:17 UTC) is at 19:17 in summer and 18:17 in winter, so both check tomorrow's
+# prices.
 PRICES_FOR_TOMORROW_FROM = time(16, 0)
 
 # Actuals are complete for yesterday; forecasts and prices for today.
