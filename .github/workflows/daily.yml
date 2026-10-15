@@ -1,16 +1,17 @@
 name: daily
 
 # One linear run: land SMARD in bronze, merge silver, build gold with dbt, export to S3.
-# Twice a day: the morning run picks up yesterday's actuals and today's forecasts; the
-# afternoon run tomorrow's day-ahead prices, published early afternoon in Germany. Two runs
-# also time SMARD's publications to within about 12 hours. Minute 17 avoids the top-of-hour
-# rush on GitHub's scheduler. SMARD revises values months later, so the Sunday morning run
-# re-lands the last year instead of the last two weeks.
+# The morning run picks up yesterday's actuals and today's forecasts. SMARD publishes tomorrow's
+# day-ahead prices at no fixed time in the afternoon, so it is polled every 30 minutes, and the
+# last afternoon run reports whether they arrived. Minute 17 avoids the top-of-hour rush on
+# GitHub's scheduler. SMARD revises values months later, so the Sunday morning run re-lands the
+# last year instead of the last two weeks.
 on:
   schedule:
     - cron: "17 5 * * 1-6"
     - cron: "17 5 * * 0"
-    - cron: "17 15 * * *"
+    - cron: "17,47 11-16 * * *"
+    - cron: "17 17 * * *"
   workflow_dispatch:
 
 permissions:
@@ -38,6 +39,7 @@ jobs:
       DATABRICKS_CLIENT_SECRET: ${{ secrets.DATABRICKS_CLIENT_SECRET }}
       SERVING_BUCKET: ${{ vars.SERVING_BUCKET }}
       API_URL: ${{ vars.API_URL }}
+      POLL: ${{ github.event.schedule == '17,47 11-16 * * *' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
@@ -53,8 +55,24 @@ jobs:
           --weeks ${{ github.event.schedule == '17 5 * * 0' && 53 || 2 }}
           --resolution hour quarterhour --report "$RUNNER_TEMP/landing.json"
 
+      # Landing needs no Databricks compute; the rest runs only for new chunks, and on a poll
+      # only for new prices. Chunks a skipped run landed are merged by the next run's lookback.
+      - id: new
+        name: check for new data
+        env:
+          MANUAL: ${{ github.event_name == 'workflow_dispatch' }}
+        run: |
+          if [ "$MANUAL" = true ]; then
+            data=true
+          else
+            data=$(jq --arg poll "$POLL" '[.landed[] | select(.written > 0)
+              | select($poll != "true" or .series == "PRICE_DE_LU")] | length > 0'               "$RUNNER_TEMP/landing.json")
+          fi
+          echo "data=$data" >> "$GITHUB_OUTPUT"
+
       - id: silver
         name: merge silver
+        if: steps.new.outputs.data == 'true'
         run: |
           databricks bundle deploy -t prod
           databricks bundle run silver_smard -t prod
@@ -62,6 +80,7 @@ jobs:
       # dbt runs as a pinned tool; see docs/runbooks/databricks-workspace.md.
       - id: gold
         name: build gold
+        if: steps.new.outputs.data == 'true'
         working-directory: dbt
         run: >-
           uvx --from dbt-core==1.12.5 --with dbt-databricks==1.12.6
@@ -69,19 +88,25 @@ jobs:
 
       # The role trusts main only, so a run from another branch cannot publish.
       - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        if: steps.new.outputs.data == 'true'
         with:
           role-to-assume: ${{ vars.AWS_EXPORT_ROLE_ARN }}
           aws-region: us-east-1
       - id: export
         name: export
+        if: steps.new.outputs.data == 'true'
         run: >-
           uv run --no-dev python -m spotgrid_lakehouse.export.gold
           --report "$RUNNER_TEMP/manifest.json"
 
-      # Runs after failures too: the summary, the issues and the Telegram digest.
+      # Runs after failures too: the summary, the issues and the Telegram digest. A poll with
+      # nothing new stays silent; a run without compute skips the warehouse checks.
       - name: report and alerts
-        if: always() && steps.start.outcome == 'success'
+        if: >-
+          always() && steps.start.outcome == 'success'
+          && (env.POLL != 'true' || steps.new.outputs.data != 'false')
         env:
+          DATABRICKS_HTTP_PATH: ${{ steps.new.outputs.data == 'true' && vars.DATABRICKS_HTTP_PATH || '' }}
           GITHUB_TOKEN: ${{ github.token }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
@@ -99,5 +124,5 @@ jobs:
       # Free Edition can't lower the warehouse's 10-minute auto-stop; idle time was about
       # two thirds of its cost. Last, so the report's queries are done.
       - name: stop warehouse
-        if: always()
+        if: always() && steps.new.outputs.data == 'true'
         run: databricks warehouses stop "${DATABRICKS_HTTP_PATH##*/}" --no-wait
