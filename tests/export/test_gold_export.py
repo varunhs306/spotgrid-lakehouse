@@ -17,6 +17,15 @@ HOURLY = pa.table(
         "price_eur_mwh": [88.5, -1.25],
     }
 )
+QUARTERHOUR = pa.table(
+    {
+        "ts_utc": pa.array(
+            [datetime(2026, 10, 8, 22, tzinfo=UTC), datetime(2026, 10, 8, 22, 15, tzinfo=UTC)],
+            pa.timestamp("us", tz="UTC"),
+        ),
+        "price_eur_mwh": [90.0, 87.0],
+    }
+)
 DAILY = pa.table({"local_date": [date(2026, 10, 9)], "negative_price_hours": [1]})
 
 
@@ -41,7 +50,13 @@ class FakeStore:
 
 
 def tables():
-    return FakeWarehouse({"hourly_features": HOURLY, "daily_price_summary": DAILY})
+    return FakeWarehouse(
+        {
+            "hourly_features": HOURLY,
+            "quarterhour_features": QUARTERHOUR,
+            "daily_price_summary": DAILY,
+        }
+    )
 
 
 def exported_at():
@@ -54,8 +69,16 @@ def test_each_table_lands_as_parquet_at_a_fixed_key():
 
     export(warehouse, store)
 
-    assert store.writes[:2] == ["gold/hourly_features.parquet", "gold/daily_price_summary.parquet"]
-    assert warehouse.reads == [("hourly_features", "ts_utc"), ("daily_price_summary", "local_date")]
+    assert store.writes[:3] == [
+        "gold/hourly_features.parquet",
+        "gold/quarterhour_features.parquet",
+        "gold/daily_price_summary.parquet",
+    ]
+    assert warehouse.reads == [
+        ("hourly_features", "ts_utc"),
+        ("quarterhour_features", "ts_utc"),
+        ("daily_price_summary", "local_date"),
+    ]
     data, content_type = store.objects["gold/hourly_features.parquet"]
     assert content_type == PARQUET
     assert pq.read_table(io.BytesIO(data)).equals(HOURLY)
@@ -95,6 +118,7 @@ def test_manifest_has_row_counts_and_latest_time():
     hourly = manifest["tables"]["hourly_features"]
     assert hourly["rows"] == 2
     assert hourly["max_time"] == "2026-10-08T23:00:00+00:00"
+    assert manifest["tables"]["quarterhour_features"]["max_time"] == "2026-10-08T22:15:00+00:00"
     assert manifest["tables"]["daily_price_summary"]["max_time"] == "2026-10-09"
     body = store.objects["gold/hourly_features.parquet"][0]
     assert hourly["sha256"] == hashlib.sha256(body).hexdigest()
