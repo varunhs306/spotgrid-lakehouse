@@ -26,7 +26,8 @@ jobs:
     # The service principal writes every layer; only main's code may run as it.
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # Each step has its own limit, so a hung step fails and the report still runs.
+    timeout-minutes: 100
     permissions:
       contents: read
       id-token: write
@@ -48,8 +49,10 @@ jobs:
       - id: start
         run: echo "at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
 
+      # SMARD requests are retried with backoff. Sunday re-lands 53 weeks instead of 2.
       - id: land
         name: land bronze
+        timeout-minutes: ${{ github.event.schedule == '17 5 * * 0' && 40 || 10 }}
         run: >-
           uv run --no-dev python -m spotgrid_lakehouse.landing.smard
           --weeks ${{ github.event.schedule == '17 5 * * 0' && 53 || 2 }}
@@ -73,6 +76,7 @@ jobs:
       - id: silver
         name: merge silver
         if: steps.new.outputs.data == 'true'
+        timeout-minutes: 25 # the job's own timeout and one retry
         run: |
           databricks bundle deploy -t prod
           databricks bundle run silver_smard -t prod
@@ -81,6 +85,7 @@ jobs:
       - id: gold
         name: build gold
         if: steps.new.outputs.data == 'true'
+        timeout-minutes: 15
         working-directory: dbt
         run: >-
           uvx --from dbt-core==1.12.5 --with dbt-databricks==1.12.6
@@ -95,6 +100,7 @@ jobs:
       - id: export
         name: export
         if: steps.new.outputs.data == 'true'
+        timeout-minutes: 10
         run: >-
           uv run --no-dev python -m spotgrid_lakehouse.export.gold
           --report "$RUNNER_TEMP/manifest.json"
@@ -105,6 +111,7 @@ jobs:
         if: >-
           always() && steps.start.outcome == 'success'
           && (env.POLL != 'true' || steps.new.outputs.data != 'false')
+        timeout-minutes: 5
         env:
           DATABRICKS_HTTP_PATH: ${{ steps.new.outputs.data == 'true' && vars.DATABRICKS_HTTP_PATH || '' }}
           GITHUB_TOKEN: ${{ github.token }}
@@ -125,4 +132,5 @@ jobs:
       # two thirds of its cost. Last, so the report's queries are done.
       - name: stop warehouse
         if: always() && steps.new.outputs.data == 'true'
+        timeout-minutes: 2
         run: databricks warehouses stop "${DATABRICKS_HTTP_PATH##*/}" --no-wait

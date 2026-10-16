@@ -25,6 +25,11 @@ resources:
           spark_python_task:
             python_file: jobs/silver_smard.py
             parameters: ["--lookback-days", "3"]
+          # A run takes about 2 minutes. A retry is safe: MERGE and the revisions log skip
+          # what they already hold.
+          timeout_seconds: 600
+          max_retries: 1
+          min_retry_interval_millis: 60000
       environments:
         - environment_key: default
           spec:
