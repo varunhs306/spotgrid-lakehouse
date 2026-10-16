@@ -74,3 +74,24 @@ models:
         description: Median change relative to the old value, in percent
       - name: observed_since
         description: First landing; earlier revisions were never seen
+
+unit_tests:
+  - name: revision_stats_on_known_revisions
+    model: revision_stats
+    given:
+      - input: source("silver", "smard_timeseries")
+        rows:
+          - {series_id: 1225, region: DE, resolution: hour, ts_utc: "2026-07-01 00:00:00", first_seen_at: "2026-07-01 12:00:00"}
+          - {series_id: 1225, region: DE, resolution: hour, ts_utc: "2026-07-01 01:00:00", first_seen_at: "2026-07-01 12:00:00"}
+          - {series_id: 1225, region: DE, resolution: hour, ts_utc: "2026-07-01 02:00:00", first_seen_at: "2026-07-01 12:00:00"}
+          - {series_id: 1225, region: DE, resolution: hour, ts_utc: "2026-07-01 03:00:00", first_seen_at: "2026-07-01 12:00:00"}
+          - {series_id: 4169, region: DE-LU, resolution: hour, ts_utc: "2026-07-01 00:00:00", first_seen_at: "2026-06-30 12:00:00"}
+      - input: source("silver", "revisions")
+        rows:
+          - {series_id: 1225, region: DE, resolution: hour, ts_utc: "2026-07-01 00:00:00", old_value: 10, new_value: 12, detected_at: "2026-07-03 00:00:00"}
+          - {series_id: 1225, region: DE, resolution: hour, ts_utc: "2026-07-01 00:00:00", old_value: 12, new_value: 11, detected_at: "2026-07-11 00:00:00"}
+          - {series_id: 1225, region: DE, resolution: hour, ts_utc: "2026-07-01 01:00:00", old_value: 100, new_value: 90, detected_at: "2026-07-05 01:00:00"}
+    expect:
+      rows:
+        - {series_id: 1225, series_name: WIND_OFFSHORE, slots: 4, revisions: 3, revised_slots: 2, revised_slots_pct: 50.0, median_delay_days: 4.0, p95_delay_days: 9.4, max_delay_days: 10.0, median_abs_change: 2.0, p95_abs_change: 9.2, max_abs_change: 10.0, median_change_pct: 10.0, last_revision_at: "2026-07-11 00:00:00"}
+        - {series_id: 4169, series_name: PRICE_DE_LU, slots: 1, revisions: 0, revised_slots: 0, revised_slots_pct: 0.0, median_delay_days: null, max_abs_change: null, last_revision_at: null}
