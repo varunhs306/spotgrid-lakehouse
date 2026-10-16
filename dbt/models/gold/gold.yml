@@ -54,3 +54,23 @@ models:
         description: Hours with a price below zero
       - name: price_hours
         description: Hours with a published price; 23 or 25 on daylight-saving days
+
+  - name: revision_stats
+    description: >
+      How often, how late and by how much SMARD revised each series since landing began.
+      Changes are in the series' unit, EUR/MWh for prices and MWh per slot for volumes.
+    columns:
+      - name: series_id
+        data_tests: [not_null]
+      - name: slots
+        description: Slots in silver
+      - name: revisions
+        description: Changes to published values; a slot can change more than once
+      - name: revised_slots_pct
+        description: Share of slots changed at least once, in percent
+      - name: median_delay_days
+        description: Median days from slot start to the landing that carried the change
+      - name: median_change_pct
+        description: Median change relative to the old value, in percent
+      - name: observed_since
+        description: First landing; earlier revisions were never seen

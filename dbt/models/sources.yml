@@ -16,3 +16,10 @@ sources:
             data_tests: [not_null]
           - name: value
             data_tests: [not_null]
+      - name: revisions
+        description: One row per change SMARD made to a published value. Built by the silver_smard job.
+        columns:
+          - name: ts_utc
+            data_tests: [not_null]
+          - name: detected_at
+            data_tests: [not_null]
