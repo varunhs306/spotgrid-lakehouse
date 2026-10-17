@@ -81,15 +81,17 @@ jobs:
           databricks bundle deploy -t prod
           databricks bundle run silver_smard -t prod
 
-      # dbt runs as a pinned tool; see docs/runbooks/databricks-workspace.md.
+      # dbt runs as a pinned tool; see docs/runbooks/databricks-workspace.md. Source freshness
+      # catches a silver merge that succeeds but stops changing anything.
       - id: gold
         name: build gold
         if: steps.new.outputs.data == 'true'
         timeout-minutes: 15
         working-directory: dbt
-        run: >-
-          uvx --from dbt-core==1.12.5 --with dbt-databricks==1.12.6
-          dbt build --profiles-dir . --target ci
+        run: |
+          dbt="uvx --from dbt-core==1.12.5 --with dbt-databricks==1.12.6 dbt"
+          $dbt build --profiles-dir . --target ci
+          $dbt source freshness --profiles-dir . --target ci
 
       # The role trusts main only, so a run from another branch cannot publish.
       - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0

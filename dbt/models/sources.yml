@@ -9,6 +9,12 @@ sources:
         description: >
           SMARD series at native resolution, one row per series, region, resolution and slot.
           Built by the silver_smard job. Bundesnetzagentur | SMARD.de (CC BY 4.0).
+        # The morning run always lands yesterday's actuals, so a value changes every day.
+        config:
+          loaded_at_field: last_changed_at
+          freshness:
+            warn_after: {count: 26, period: hour}
+            error_after: {count: 50, period: hour}
         columns:
           - name: series_id
             data_tests: [not_null]
