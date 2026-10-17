@@ -100,6 +100,19 @@ models:
       - name: observed_since
         description: First landing; earlier revisions were never seen
 
+  - name: generation_mix_monthly
+    description: >
+      Energy by source and the share of load met by wind and solar, per German local month.
+      Counts only hours with load and all three generation series.
+    columns:
+      - name: month
+        description: First day of the local month
+        data_tests: [unique, not_null]
+      - name: is_complete
+        description: Every hour of the month is counted
+      - name: wind_solar_share_pct
+        description: Wind onshore, offshore and solar generation over load, in percent
+
 unit_tests:
   - name: revision_stats_on_known_revisions
     model: revision_stats
