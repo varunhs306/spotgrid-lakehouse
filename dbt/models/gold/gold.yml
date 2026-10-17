@@ -5,26 +5,51 @@ models:
     description: >
       One row per UTC hour: day-ahead price, load, wind and solar actuals and forecasts, and
       residual load. Bundesnetzagentur | SMARD.de (CC BY 4.0).
+    # The forecast project reads this table. Renaming, retyping or dropping a column breaks
+    # it, so the build fails until the contract and contracts/hourly_features.json change too.
+    config:
+      contract:
+        enforced: true
     columns:
       - name: ts_utc
+        data_type: timestamp
         description: Hour start
-        data_tests: [unique, not_null]
+        constraints: [{type: not_null}]
+        data_tests: [unique]
       - name: local_date
+        data_type: date
         description: Hour start date in Europe/Berlin
-        data_tests: [not_null]
+        constraints: [{type: not_null}]
       - name: price_zone
+        data_type: string
         description: Bidding zone of the price, DE-AT-LU until 2018-09-30, DE-LU after
         data_tests:
           - accepted_values:
               arguments:
                 values: ["DE-LU", "DE-AT-LU"]
       - name: price_eur_mwh
+        data_type: double
         description: Day-ahead price in price_zone
       - name: load_mwh
+        data_type: double
         description: Grid load
+      - name: wind_onshore_mwh
+        data_type: double
+      - name: wind_offshore_mwh
+        data_type: double
+      - name: solar_mwh
+        data_type: double
+      - name: forecast_wind_onshore_mwh
+        data_type: double
+      - name: forecast_wind_offshore_mwh
+        data_type: double
+      - name: forecast_solar_mwh
+        data_type: double
       - name: residual_load_mwh
+        data_type: double
         description: Load minus wind and solar generation; null until all four are published
       - name: source_resolution
+        data_type: string
         description: Resolution of the silver rows this hour was built from
         data_tests:
           - accepted_values:
