@@ -113,7 +113,7 @@ def test_manifest_has_row_counts_and_latest_time():
     manifest = export(tables(), store, now=exported_at)
 
     assert json.loads(store.objects[MANIFEST_KEY][0]) == manifest
-    assert manifest["version"] == 1
+    assert manifest["version"] == 2
     assert manifest["exported_at"] == "2026-10-09T05:30:00+00:00"
     hourly = manifest["tables"]["hourly_features"]
     assert hourly["rows"] == 2
@@ -123,6 +123,10 @@ def test_manifest_has_row_counts_and_latest_time():
     body = store.objects["gold/hourly_features.parquet"][0]
     assert hourly["sha256"] == hashlib.sha256(body).hexdigest()
     assert hourly["bytes"] == len(body)
+    assert hourly["columns"] == [
+        {"name": "ts_utc", "type": "timestamp[us, tz=UTC]"},
+        {"name": "price_eur_mwh", "type": "double"},
+    ]
 
 
 def test_empty_table_has_no_latest_time():
