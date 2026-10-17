@@ -1,0 +1,62 @@
+name: snapshot
+
+# A versioned copy of the full gold history on GitHub Releases each month, with checksums, so
+# a result can cite the exact data it used. Runs after the 1st's morning pipeline.
+on:
+  schedule:
+    - cron: "23 7 1 * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: snapshot
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write # create the release
+    env:
+      DATABRICKS_HOST: ${{ vars.DATABRICKS_HOST }}
+      DATABRICKS_HTTP_PATH: ${{ vars.DATABRICKS_HTTP_PATH }}
+      DATABRICKS_CLIENT_ID: ${{ vars.DATABRICKS_CLIENT_ID }}
+      DATABRICKS_CLIENT_SECRET: ${{ secrets.DATABRICKS_CLIENT_SECRET }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+      - uses: databricks/setup-cli@9230f12203ef173d0b901846f62a55ce997efef7 # v1.19.0
+      - run: uv sync --locked --no-dev
+
+      - name: export
+        timeout-minutes: 10
+        run: uv run --no-dev python -m spotgrid_lakehouse.export.gold --out-dir snapshot
+
+      - name: checksums
+        working-directory: snapshot
+        run: |
+          mv gold/*.parquet . && rmdir gold && mv _manifest.json manifest.json
+          sha256sum -- *.parquet manifest.json > SHA256SUMS
+
+      # Rerunning in the same month replaces that month's files.
+      - name: release
+        run: |
+          tag="data-$(date -u +%Y-%m)"
+          notes="Gold tables as of $(jq -r .exported_at snapshot/manifest.json). Verify with \`sha256sum -c SHA256SUMS\`.
+
+          Data: $(jq -r .attribution snapshot/manifest.json)"
+          if gh release view "$tag" > /dev/null 2>&1; then
+            gh release upload "$tag" snapshot/* --clobber
+          else
+            gh release create "$tag" snapshot/* --title "Data snapshot $(date -u +%Y-%m)" --notes "$notes"
+          fi
+
+      - name: stop warehouse
+        if: always()
+        timeout-minutes: 2
+        run: databricks warehouses stop "${DATABRICKS_HTTP_PATH##*/}" --no-wait

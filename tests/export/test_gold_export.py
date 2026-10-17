@@ -6,7 +6,7 @@ from datetime import UTC, date, datetime
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from spotgrid_lakehouse.export.gold import MANIFEST_KEY, PARQUET, export
+from spotgrid_lakehouse.export.gold import MANIFEST_KEY, PARQUET, LocalStore, export
 
 HOURLY = pa.table(
     {
@@ -140,3 +140,11 @@ def test_empty_table_has_no_latest_time():
 
     assert manifest["tables"]["daily_price_summary"]["rows"] == 0
     assert manifest["tables"]["daily_price_summary"]["max_time"] is None
+
+
+def test_local_store_lays_files_out_like_the_bucket(tmp_path):
+    manifest = export(tables(), LocalStore(tmp_path), now=exported_at)
+
+    hourly = tmp_path / "gold" / "hourly_features.parquet"
+    assert pq.read_table(hourly).num_rows == 2
+    assert json.loads((tmp_path / MANIFEST_KEY).read_text()) == manifest
