@@ -30,7 +30,9 @@ TABLES = {
 PREFIX = "gold"
 PARQUET = "application/vnd.apache.parquet"
 MANIFEST_KEY = "_manifest.json"
-MANIFEST_VERSION = 1
+# Bumped on any change readers must handle; contracts/manifest.schema.json describes it.
+# 2: each table lists its columns.
+MANIFEST_VERSION = 2
 # CC BY 4.0 asks for the source, a licence link and a note that the data was changed.
 ATTRIBUTION = (
     "Bundesnetzagentur | SMARD.de, CC BY 4.0 (https://creativecommons.org/licenses/by/4.0/); "
@@ -80,6 +82,7 @@ def export(
             "max_time": latest.isoformat() if latest is not None else None,
             "sha256": hashlib.sha256(body).hexdigest(),
             "bytes": len(body),
+            "columns": [{"name": f.name, "type": str(f.type)} for f in data.schema],
         }
     manifest = {
         "version": MANIFEST_VERSION,
