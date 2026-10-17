@@ -1,3 +1,4 @@
+import json
 from datetime import UTC, date, datetime, timedelta
 
 import pyarrow as pa
@@ -7,7 +8,7 @@ from mangum import Mangum
 
 from spotgrid_lakehouse.api.app import create_app
 from spotgrid_lakehouse.api.data import GoldData
-from spotgrid_lakehouse.export.gold import ATTRIBUTION, MANIFEST_KEY, export
+from spotgrid_lakehouse.export.gold import ATTRIBUTION, MANIFEST_KEY, MANIFEST_VERSION, export
 
 # Ten local days in October (CEST, UTC+2). The last day has prices and forecasts only, as the
 # day-ahead auction publishes before the actuals.
@@ -219,7 +220,15 @@ def test_freshness_reports_the_export_and_how_far_each_table_reaches(client):
     }
 
 
-@pytest.mark.parametrize("path", ["/v1/prices", "/v1/freshness"])
+def test_manifest_is_served_as_published(client, bucket):
+    response = client.get("/v1/manifest")
+
+    assert response.status_code == 200
+    assert response.json() == json.loads(bucket.objects[MANIFEST_KEY])
+    assert response.json()["version"] == MANIFEST_VERSION
+
+
+@pytest.mark.parametrize("path", ["/v1/prices", "/v1/freshness", "/v1/manifest"])
 def test_no_export_yet_is_unavailable(path):
     client = TestClient(create_app(GoldData(Bucket())))
 

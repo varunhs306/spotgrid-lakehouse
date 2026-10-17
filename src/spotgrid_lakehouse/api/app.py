@@ -183,6 +183,16 @@ def freshness(data: Gold, request: Request) -> Freshness:
     )
 
 
+@router.get(
+    "/manifest",
+    summary="The export manifest as published: tables, columns, row counts and checksums",
+    description="Follows contracts/manifest.schema.json in the repository; `version` changes "
+    "with any change readers must handle.",
+)
+def manifest(data: Gold) -> dict:
+    return data.manifest()
+
+
 def create_app(data: GoldData, now: Callable[[], datetime] = lambda: datetime.now(UTC)) -> FastAPI:
     app = FastAPI(
         title="spotgrid",
