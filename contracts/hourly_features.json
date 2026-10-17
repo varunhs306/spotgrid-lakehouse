@@ -1,0 +1,71 @@
+{
+  "table": "workspace.gold.hourly_features",
+  "grain": "one row per UTC hour",
+  "columns": [
+    {
+      "name": "ts_utc",
+      "type": "timestamp",
+      "nullable": false
+    },
+    {
+      "name": "local_date",
+      "type": "date",
+      "nullable": false
+    },
+    {
+      "name": "price_zone",
+      "type": "string",
+      "nullable": true
+    },
+    {
+      "name": "price_eur_mwh",
+      "type": "double",
+      "nullable": true
+    },
+    {
+      "name": "load_mwh",
+      "type": "double",
+      "nullable": true
+    },
+    {
+      "name": "wind_onshore_mwh",
+      "type": "double",
+      "nullable": true
+    },
+    {
+      "name": "wind_offshore_mwh",
+      "type": "double",
+      "nullable": true
+    },
+    {
+      "name": "solar_mwh",
+      "type": "double",
+      "nullable": true
+    },
+    {
+      "name": "forecast_wind_onshore_mwh",
+      "type": "double",
+      "nullable": true
+    },
+    {
+      "name": "forecast_wind_offshore_mwh",
+      "type": "double",
+      "nullable": true
+    },
+    {
+      "name": "forecast_solar_mwh",
+      "type": "double",
+      "nullable": true
+    },
+    {
+      "name": "residual_load_mwh",
+      "type": "double",
+      "nullable": true
+    },
+    {
+      "name": "source_resolution",
+      "type": "string",
+      "nullable": true
+    }
+  ]
+}
