@@ -131,19 +131,34 @@ class S3Store:
         self._s3.put_object(Bucket=self._bucket, Key=key, Body=data, ContentType=content_type)
 
 
+class LocalStore:
+    """A directory laid out like the serving bucket, e.g. for a release snapshot."""
+
+    def __init__(self, root: Path) -> None:
+        self._root = root
+
+    def put(self, key: str, data: bytes, content_type: str) -> None:
+        path = self._root / key
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description="Export gold tables to the serving bucket.")
-    parser.add_argument("--bucket", default=os.environ.get("SERVING_BUCKET"))
+    target = parser.add_mutually_exclusive_group()
+    target.add_argument("--bucket", default=os.environ.get("SERVING_BUCKET"))
+    target.add_argument("--out-dir", type=Path, help="write to this directory instead of S3")
     parser.add_argument("--http-path", default=os.environ.get("DATABRICKS_HTTP_PATH"))
     parser.add_argument("--profile", help="Databricks config profile; default auth chain if unset")
     parser.add_argument("--report", type=Path, help="also write the manifest to this file")
     args = parser.parse_args(argv)
-    if not args.bucket or not args.http_path:
+    if not (args.bucket or args.out_dir) or not args.http_path:
         parser.error("set --bucket and --http-path, or SERVING_BUCKET and DATABRICKS_HTTP_PATH")
 
+    store = LocalStore(args.out_dir) if args.out_dir else S3Store(args.bucket)
     warehouse = SqlWarehouse(args.http_path, args.profile)
     try:
-        manifest = export(warehouse, S3Store(args.bucket))
+        manifest = export(warehouse, store)
     finally:
         warehouse.close()
     for name, entry in manifest["tables"].items():
