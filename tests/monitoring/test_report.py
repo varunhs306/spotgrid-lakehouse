@@ -153,6 +153,14 @@ def test_quarantine_summary_by_reason():
     assert "Nothing quarantined." in markdown(report(quarantine=[]))
 
 
+def test_quarantine_spike_fails_the_run():
+    spike = report(quarantine=[{"reason": "bad_payload", "rows": 168}])
+    few = report(quarantine=[{"reason": "out_of_range", "rows": 2}])
+
+    assert (spike["run"]["status"], spike["run"]["failed_step"]) == ("failure", "quarantine")
+    assert few["run"]["status"] == "success"
+
+
 def test_markdown_of_a_failed_run_skips_missing_sections():
     skipped = dict.fromkeys(("merge silver", "build gold", "export"), "skipped")
     outcomes = OK | {"land bronze": "failure"} | skipped

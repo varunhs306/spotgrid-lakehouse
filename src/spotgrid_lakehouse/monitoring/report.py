@@ -28,6 +28,8 @@ SILVER = "workspace.silver.smard_timeseries"
 QUARANTINE = "workspace.silver.quarantine"
 # Step names in .github/workflows/daily.yml, in run order.
 STEPS = ("land bronze", "merge silver", "build gold", "export")
+# Clean SMARD data quarantines nothing; a day of one series means something changed upstream.
+QUARANTINE_SPIKE = 24
 ICONS = {"success": "✅", "failure": "❌", "cancelled": "⛔", "skipped": "⏭️"}
 
 # Rows the silver MERGE touched in this run: first landed, or changed by a newer landing.
@@ -147,6 +149,8 @@ def build(
     failed = next((s["name"] for s in steps if s["outcome"] in ("failure", "cancelled")), None)
     if failed is None and api is not None and not api["ok"]:
         failed = "API check"
+    if failed is None and quarantine and sum(r["rows"] for r in quarantine) >= QUARANTINE_SPIKE:
+        failed = "quarantine"
 
     findings: list[Finding] = []
     complete = None
