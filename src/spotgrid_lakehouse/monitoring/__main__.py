@@ -94,10 +94,10 @@ def main(argv: list[str] | None = None, env: dict | None = None) -> None:
     server = env.get("GITHUB_SERVER_URL", "https://github.com")
     run_url = f"{server}/{repo}/actions/runs/{run_id}" if repo and run_id else "(local run)"
 
-    silver_changes = coverage = None
+    silver_changes = coverage = quarantine = None
     if http_path := env.get("DATABRICKS_HTTP_PATH"):
         try:
-            silver_changes, coverage = collect_warehouse(
+            silver_changes, coverage, quarantine = collect_warehouse(
                 http_path, args.started_at, now, args.profile
             )
         except Exception as exc:  # the report must still go out
@@ -112,6 +112,7 @@ def main(argv: list[str] | None = None, env: dict | None = None) -> None:
         landing=read_json(args.landing),
         silver_changes=silver_changes,
         coverage=coverage,
+        quarantine=quarantine,
         dbt=dbt_summary(read_json(args.dbt_results)),
         manifest=read_json(args.manifest),
         api=check_api(env.get("API_URL"), tomorrow(now)),

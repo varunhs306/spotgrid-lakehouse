@@ -25,6 +25,7 @@ from spotgrid_lakehouse.monitoring.checks import (
 from spotgrid_lakehouse.sources.smard import Series
 
 SILVER = "workspace.silver.smard_timeseries"
+QUARANTINE = "workspace.silver.quarantine"
 # Step names in .github/workflows/daily.yml, in run order.
 STEPS = ("land bronze", "merge silver", "build gold", "export")
 ICONS = {"success": "✅", "failure": "❌", "cancelled": "⛔", "skipped": "⏭️"}
@@ -37,6 +38,13 @@ SELECT series_id, local_date,
 FROM {SILVER}
 WHERE resolution = 'hour' AND last_changed_at >= :started_at
 GROUP BY series_id, local_date
+"""
+# Rows this run kept out of silver, by reason.
+QUARANTINE_SQL = f"""
+SELECT reason, count(*) AS rows
+FROM {QUARANTINE}
+WHERE quarantined_at >= :started_at
+GROUP BY reason
 """
 COVERAGE_SQL = f"""
 SELECT series_id, local_date, count(*) AS hours
@@ -112,6 +120,11 @@ def check_api(
     }
 
 
+def quality_summary(quarantine: list[dict]) -> dict:
+    by_reason = {r["reason"]: r["rows"] for r in sorted(quarantine, key=lambda r: r["reason"])}
+    return {"quarantined": sum(by_reason.values()), "by_reason": by_reason}
+
+
 def build(
     *,
     run: dict,
@@ -125,6 +138,7 @@ def build(
     dbt: dict | None,
     manifest: dict | None,
     api: dict | None,
+    quarantine: list[dict] | None = None,
 ) -> dict:
     steps = [
         {"name": name, "outcome": outcomes.get(name, "skipped"), "seconds": seconds.get(name)}
@@ -156,6 +170,7 @@ def build(
         "steps": steps,
         "landing": landing["landed"] if landing else None,
         "silver": silver_summary(silver_changes) if silver_changes is not None else None,
+        "quality": quality_summary(quarantine) if quarantine is not None else None,
         "dbt": dbt,
         "export": manifest,
         "api": api,
@@ -203,6 +218,14 @@ def markdown(report: dict, issues: dict[str, str] | None = None) -> str:
         else:
             lines.append("No new or changed values.")
 
+    if quality := report.get("quality"):
+        lines += ["", "### Quarantine", ""]
+        if quality["quarantined"]:
+            lines += ["| Reason | Rows |", "|---|---|"]
+            lines += [f"| {reason} | {rows:,} |" for reason, rows in quality["by_reason"].items()]
+        else:
+            lines.append("Nothing quarantined.")
+
     if report["dbt"] is not None:
         dbt = report["dbt"]
         lines += ["", "### Gold", "", f"dbt: {dbt['passed']} passed, {dbt['failed']} failed, "
@@ -237,8 +260,10 @@ def markdown(report: dict, issues: dict[str, str] | None = None) -> str:
 
 def collect_warehouse(
     http_path: str, started_at: datetime, now: datetime, profile: str | None = None
-) -> tuple[list, list]:
-    """Silver changes in this run and recent coverage; raises if the warehouse is unreachable."""
+) -> tuple[list, list, list]:
+    """Silver changes and quarantined rows in this run, and recent coverage; raises if the
+    warehouse is unreachable.
+    """
     from spotgrid_lakehouse.export.gold import SqlWarehouse
 
     warehouse = SqlWarehouse(http_path, profile)
@@ -246,6 +271,7 @@ def collect_warehouse(
         changes = warehouse.query(SILVER_CHANGES_SQL, {"started_at": started_at}).to_pylist()
         first_day: date = now.date() - timedelta(days=WINDOW_DAYS)
         coverage = warehouse.query(COVERAGE_SQL, {"first_day": first_day}).to_pylist()
+        quarantine = warehouse.query(QUARANTINE_SQL, {"started_at": started_at}).to_pylist()
     finally:
         warehouse.close()
-    return changes, coverage
+    return changes, coverage, quarantine
