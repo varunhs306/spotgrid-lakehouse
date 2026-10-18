@@ -1,0 +1,41 @@
+name: probe
+
+# Times the public API from outside AWS every 30 minutes, as a visitor would see it, and keeps
+# the results in the serving bucket. Fails when an endpoint does not answer 200.
+on:
+  schedule:
+    - cron: "13,43 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: probe
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      id-token: write # assume the probe role
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+      - run: uv sync --locked --no-dev
+
+      # Until the role variable is set, results go to the log only.
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        if: vars.AWS_PROBE_ROLE_ARN != ''
+        with:
+          role-to-assume: ${{ vars.AWS_PROBE_ROLE_ARN }}
+          aws-region: us-east-1
+      - name: probe
+        env:
+          BUCKET: ${{ vars.AWS_PROBE_ROLE_ARN != '' && vars.SERVING_BUCKET || '' }}
+        run: >-
+          uv run --no-dev python -m spotgrid_lakehouse.monitoring.probe run
+          --url "${{ vars.API_URL }}" ${BUCKET:+--bucket "$BUCKET"}
