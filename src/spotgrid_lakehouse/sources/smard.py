@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 import time
 from collections.abc import Callable
 from datetime import UTC, datetime
 from enum import IntEnum, StrEnum
+from itertools import pairwise
 from types import TracebackType
 
 import httpx
@@ -15,6 +17,7 @@ import httpx
 BASE_URL = "https://www.smard.de/app/chart_data"
 USER_AGENT = "spotgrid-lakehouse (+https://github.com/varunhs306/spotgrid-lakehouse)"
 RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
+SLOT_MS = {"hour": 3_600_000, "quarterhour": 900_000}
 
 
 class Series(IntEnum):
@@ -152,6 +155,49 @@ class SmardClient:
         self.close()
 
 
+def shape_problems(
+    index: object, chunk: object, resolution: Resolution, start_ms: int
+) -> list[str]:
+    """Where SMARD's JSON no longer has the shape the pipeline reads: an index of epoch-ms
+    chunk starts, and a chunk of [epoch_ms, value or null] pairs, one per slot from `start_ms`.
+    """
+    problems = []
+    starts = index.get("timestamps") if isinstance(index, dict) else None
+    if not isinstance(starts, list) or not starts or not all(isinstance(t, int) for t in starts):
+        problems.append("index: 'timestamps' is not a list of epoch milliseconds")
+    series = chunk.get("series") if isinstance(chunk, dict) else None
+    if not isinstance(series, list) or not series:
+        return [*problems, "chunk: 'series' is missing or empty"]
+    if not all(isinstance(p, list) and len(p) == 2 for p in series):
+        return [*problems, "chunk: points are not [timestamp, value] pairs"]
+    times = [p[0] for p in series]
+    if not all(isinstance(t, int) for t in times):
+        problems.append("chunk: timestamps are not epoch milliseconds")
+    elif times[0] != start_ms or any(b - a != SLOT_MS[resolution] for a, b in pairwise(times)):
+        problems.append(f"chunk: slots do not run every {resolution} from the chunk start")
+    values = [p[1] for p in series]
+    if not all(v is None or isinstance(v, int | float) for v in values):
+        problems.append("chunk: values are not numbers or null")
+    elif all(v is None for v in values):
+        problems.append("chunk: every value is null")
+    return problems
+
+
+def check_shapes(client: SmardClient) -> list[str]:
+    """Shape problems in each series' index and its last complete weekly chunk."""
+    problems = []
+    for series in Series:
+        for resolution in Resolution:
+            index = client.get_raw(index_path(series, resolution)).json()
+            start = sorted(index["timestamps"])[-2]
+            chunk = json.loads(client.chunk(series, resolution, start))
+            problems += [
+                f"{series.name} {resolution}: {problem}"
+                for problem in shape_problems(index, chunk, resolution, start)
+            ]
+    return problems
+
+
 def _utc(ms: int) -> str:
     return datetime.fromtimestamp(ms / 1000, UTC).isoformat()
 
@@ -161,7 +207,16 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--series", default=Series.PRICE_DE_LU.name, choices=Series.__members__)
     parser.add_argument("--resolution", default=Resolution.HOUR, type=Resolution)
     parser.add_argument("--weeks-ago", default=1, type=int, help="0 is the current, partial week")
+    parser.add_argument(
+        "--check", action="store_true", help="check every series' JSON shape and exit non-zero"
+    )
     args = parser.parse_args(argv)
+
+    if args.check:
+        with SmardClient() as client:
+            problems = check_shapes(client)
+        print("\n".join(problems) or "SMARD JSON shape as expected for every series")
+        sys.exit(1 if problems else 0)
 
     series = Series[args.series]
     with SmardClient() as client:
