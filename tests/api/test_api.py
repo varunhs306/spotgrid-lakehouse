@@ -324,5 +324,30 @@ def test_warmup_loads_every_table(bucket, make_handler):
     ]
 
 
+def test_warmup_requests_every_endpoint(bucket, make_handler, monkeypatch):
+    from spotgrid_lakehouse.api import lambda_handler
+
+    paths = []
+    request = lambda_handler.request
+    monkeypatch.setattr(lambda_handler, "request", lambda path: paths.append(path) or request(path))
+
+    assert make_handler(GoldData(bucket))({"warmup": True}, None) == {"warm": True}
+    assert "/v1/prices" in paths and "/v1/manifest" in paths
+    assert all(path.startswith("/v1/") for path in paths)
+
+
+def test_warmup_refreshes_the_manifest_within_the_ttl(bucket, make_handler):
+    clock = Clock()
+    data = GoldData(bucket, ttl=600, clock=clock)
+    handler = make_handler(data)
+
+    handler({"warmup": True}, None)
+    clock.now = 300
+    handler({"warmup": True}, None)
+    data.table("hourly_features")
+
+    assert bucket.gets.count(MANIFEST_KEY) == 2
+
+
 def test_warmup_without_an_export_does_not_fail(make_handler):
     assert make_handler(GoldData(Bucket()))({"warmup": True}, None) == {"warm": False}
