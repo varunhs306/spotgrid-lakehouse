@@ -79,6 +79,20 @@ resource "aws_s3_bucket_lifecycle_configuration" "serving" {
     }
   }
 
+  # Three months of latency probes, two small files an hour.
+  rule {
+    id     = "expire-probe-results"
+    status = "Enabled"
+
+    filter {
+      prefix = "probes/"
+    }
+
+    expiration {
+      days = 90
+    }
+  }
+
   depends_on = [aws_s3_bucket_versioning.serving]
 }
 

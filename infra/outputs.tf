@@ -6,6 +6,10 @@ output "export_role_arn" {
   value = aws_iam_role.export.arn
 }
 
+output "probe_role_arn" {
+  value = aws_iam_role.probe.arn
+}
+
 output "api_url" {
   value = aws_lambda_function_url.api.function_url
 }
