@@ -25,12 +25,15 @@ class Source(Protocol):
 class GoldData:
     """Re-reads the manifest at most once per `ttl` seconds; a table is downloaded again only
     when the manifest lists a new checksum for it. A warm Lambda serves from memory.
+
+    The warm-up ping refreshes the manifest every 5 minutes, inside the 10-minute `ttl`, so
+    while it runs a request never waits on S3.
     """
 
     def __init__(
         self,
         source: Source,
-        ttl: float = 300,
+        ttl: float = 600,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._source = source
@@ -40,8 +43,8 @@ class GoldData:
         self._checked_at = 0.0
         self._tables: dict[str, tuple[str, pa.Table]] = {}
 
-    def manifest(self) -> dict:
-        if self._manifest is None or self._clock() - self._checked_at >= self._ttl:
+    def manifest(self, refresh: bool = False) -> dict:
+        if refresh or self._manifest is None or self._clock() - self._checked_at >= self._ttl:
             raw = self._source.get(MANIFEST_KEY)
             if raw is None:
                 raise NoExport(MANIFEST_KEY)
@@ -64,8 +67,10 @@ class GoldData:
         return table
 
     def warm(self) -> None:
-        """Load every exported table, so the next request is served from memory."""
-        for name in self.manifest()["tables"]:
+        """Re-read the manifest and load every exported table, so the next request is served
+        from memory.
+        """
+        for name in self.manifest(refresh=True)["tables"]:
             self.table(name)
 
 
