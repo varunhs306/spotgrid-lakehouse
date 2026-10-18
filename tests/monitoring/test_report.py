@@ -139,6 +139,20 @@ def test_markdown_summary():
     )
 
 
+def test_quarantine_summary_by_reason():
+    quarantine = [{"reason": "out_of_range", "rows": 3}, {"reason": "bad_point", "rows": 1}]
+
+    result = report(quarantine=quarantine)
+    text = markdown(result)
+
+    assert result["quality"] == {
+        "quarantined": 4,
+        "by_reason": {"bad_point": 1, "out_of_range": 3},
+    }
+    assert "| out_of_range | 3 |" in text
+    assert "Nothing quarantined." in markdown(report(quarantine=[]))
+
+
 def test_markdown_of_a_failed_run_skips_missing_sections():
     skipped = dict.fromkeys(("merge silver", "build gold", "export"), "skipped")
     outcomes = OK | {"land bronze": "failure"} | skipped

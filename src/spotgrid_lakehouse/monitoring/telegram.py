@@ -88,6 +88,8 @@ def digest(
     if report["silver"] is not None:
         lines.append(f"New rows: {sum(s['inserted'] for s in report['silver']):,}")
         lines.append(f"Changed values: {sum(s['revised'] for s in report['silver']):,}")
+    if quality := report.get("quality"):
+        lines.append(f"Quarantined: {quality['quarantined']:,}")
     if dbt := report["dbt"]:
         total = dbt["passed"] + dbt["failed"] + dbt["warned"] + dbt["skipped"]
         lines.append(f"dbt: {dbt['passed']}/{total} passed")
