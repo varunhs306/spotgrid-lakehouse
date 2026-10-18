@@ -1,0 +1,21 @@
+name: smard-contract
+
+# The pipeline relies on the shape of SMARD's undocumented JSON. A weekly check of every series
+# catches a change before it fills the quarantine.
+on:
+  schedule:
+    - cron: "41 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+      - run: uv sync --locked --no-dev
+      - run: uv run --no-dev python -m spotgrid_lakehouse.sources.smard --check
