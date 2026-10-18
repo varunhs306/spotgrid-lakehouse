@@ -9,10 +9,12 @@ from pyspark.sql import DataFrame, SparkSession, Window
 from pyspark.sql import functions as F
 
 from spotgrid_lakehouse.landing.volume import LANDING_ROOT
+from spotgrid_lakehouse.sources.smard import Resolution, Series
 
 SILVER_TABLE = "workspace.silver.smard_timeseries"
 REBUILD_TABLE = "workspace.silver.smard_timeseries_rebuild"
 REVISIONS_TABLE = "workspace.silver.revisions"
+QUARANTINE_TABLE = "workspace.silver.quarantine"
 # The JSON body of one chunk file; meta_data is not needed downstream.
 CHUNK_SCHEMA = "series ARRAY<ARRAY<DOUBLE>>"
 # Chunk files start with the series id; this skips _manifest.json and _index.json.
@@ -80,6 +82,48 @@ WHEN NOT MATCHED THEN INSERT *
 """
 REVISION_COLUMNS = [*KEY, "local_date", "old_value", "new_value", "detected_at"]
 
+QUARANTINE_DDL = """
+CREATE TABLE IF NOT EXISTS {table} (
+  file_path STRING NOT NULL COMMENT 'Bronze chunk the row came from',
+  series_id INT,
+  region STRING,
+  resolution STRING,
+  ts_utc TIMESTAMP COMMENT 'Slot start; null when the chunk could not be read',
+  value DOUBLE,
+  reason STRING NOT NULL COMMENT 'Why the row was kept out of silver',
+  fetched_at TIMESTAMP NOT NULL COMMENT 'Landing time of the chunk',
+  quarantined_at TIMESTAMP NOT NULL COMMENT 'Run that first quarantined the row'
+)
+USING DELTA
+COMMENT 'Rows from bronze kept out of silver, with a reason code'
+"""
+
+# A rerun, or the lookback reading the same chunk again, adds nothing.
+QUARANTINE_MERGE_SQL = """
+MERGE INTO {table} AS t
+USING {source} AS s
+ON t.file_path = s.file_path AND t.ts_utc <=> s.ts_utc AND t.reason = s.reason
+WHEN NOT MATCHED THEN INSERT *
+"""
+QUARANTINE_COLUMNS = ["file_path", *KEY, "value", "reason", "fetched_at"]
+
+# Values the German power system cannot produce, or the day-ahead market cannot clear, per
+# hour; a quarter-hour slot holds a quarter of an hour's energy. Kept in step with
+# dbt/tests/assert_values_within_physical_limits.sql, which checks silver as a backstop.
+LIMITS = {
+    Series.PRICE_DE_LU: (-500, 4000, False),
+    Series.PRICE_DE_AT_LU: (-500, 4000, False),
+    Series.LOAD: (20000, 100000, True),
+    Series.WIND_ONSHORE: (0, 80000, True),
+    Series.FORECAST_WIND_ONSHORE: (0, 80000, True),
+    Series.WIND_OFFSHORE: (0, 20000, True),
+    Series.FORECAST_WIND_OFFSHORE: (0, 20000, True),
+    Series.SOLAR: (0, 150000, True),
+    Series.FORECAST_SOLAR: (0, 150000, True),
+}
+# Forecasts and prices reach a day or two past the landing; further is a bad timestamp.
+MAX_LEAD_DAYS = 3
+
 
 def read_chunks(
     spark: SparkSession, root: str = LANDING_ROOT, modified_after: datetime | None = None
@@ -100,7 +144,7 @@ def read_chunks(
     )
 
 
-def parse_chunks(chunks: DataFrame) -> DataFrame:
+def parse_chunks(chunks: DataFrame, keep_path: bool = False) -> DataFrame:
     """One row per filled slot of each chunk.
 
     Expects `file_path`, `fetched_at` and `series` ([epoch_ms, value] pairs). SMARD serves
@@ -109,12 +153,14 @@ def parse_chunks(chunks: DataFrame) -> DataFrame:
     path = F.col("file_path")
     return (
         chunks.select(
-            F.regexp_extract(path, PATH_PATTERN, 1).cast("int").alias("series_id"),
+            F.regexp_extract(path, PATH_PATTERN, 1).try_cast("int").alias("series_id"),
             F.regexp_extract(path, PATH_PATTERN, 2).alias("region"),
             F.regexp_extract(path, PATH_PATTERN, 3).alias("resolution"),
             F.explode("series").alias("point"),
             "fetched_at",
+            "file_path",
         )
+        .where(F.size("point") == 2)
         .select(
             "series_id",
             "region",
@@ -122,9 +168,85 @@ def parse_chunks(chunks: DataFrame) -> DataFrame:
             F.col("point")[0].cast("long").alias("ts_ms"),
             F.col("point")[1].alias("value"),
             "fetched_at",
+            *(["file_path"] if keep_path else []),
         )
         .where(F.col("value").isNotNull())
     )
+
+
+def unreadable(chunks: DataFrame) -> DataFrame:
+    """Quarantine rows for chunks whose JSON no longer has the expected shape, and for points
+    that are not [epoch_ms, value] pairs.
+    """
+    path = F.col("file_path")
+    keys = [
+        F.regexp_extract(path, PATH_PATTERN, 1).try_cast("int").alias("series_id"),
+        F.regexp_extract(path, PATH_PATTERN, 2).alias("region"),
+        F.regexp_extract(path, PATH_PATTERN, 3).alias("resolution"),
+    ]
+    payload = chunks.where(F.col("series").isNull()).select(
+        "file_path",
+        *keys,
+        F.lit(None).cast("timestamp").alias("ts_utc"),
+        F.lit(None).cast("double").alias("value"),
+        F.lit("bad_payload").alias("reason"),
+        "fetched_at",
+    )
+    points = (
+        chunks.select("file_path", *keys, F.explode("series").alias("point"), "fetched_at")
+        .where(F.size("point") != 2)
+        .select(
+            "file_path",
+            "series_id",
+            "region",
+            "resolution",
+            F.timestamp_millis(F.col("point")[0].cast("long")).alias("ts_utc"),
+            F.lit(None).cast("double").alias("value"),
+            F.lit("bad_point").alias("reason"),
+            "fetched_at",
+        )
+    )
+    return payload.unionByName(points)
+
+
+def with_reason(rows: DataFrame) -> DataFrame:
+    """Add `reason`: null for a row fit for silver, else why it is quarantined.
+
+    Expects the columns `with_time_columns` returns.
+    """
+    series, resolution, ts, value = (
+        F.col("series_id"),
+        F.col("resolution"),
+        F.col("ts_utc"),
+        F.col("value"),
+    )
+    step = F.when(resolution == Resolution.HOUR.value, 60).otherwise(15)
+    misaligned = (F.minute(ts) % step != 0) | (F.second(ts) != 0)
+    out_of_range = F.lit(False)
+    for s, (low, high, per_slot) in LIMITS.items():
+        scale = F.when(resolution == Resolution.QUARTERHOUR.value, 0.25 if per_slot else 1.0)
+        scale = scale.otherwise(1.0)
+        out_of_range = out_of_range | (
+            (series == s.value) & ((value < low * scale) | (value > high * scale))
+        )
+    lead = F.expr(f"INTERVAL {MAX_LEAD_DAYS} DAYS")
+    reason = (
+        F.when(series.isNull(), "unknown_path")
+        .when(~series.isin([s.value for s in Series]), "unknown_series")
+        .when(~resolution.isin([r.value for r in Resolution]), "unknown_resolution")
+        .when(misaligned, "misaligned_slot")
+        .when(ts > F.col("fetched_at") + lead, "future_slot")
+        .when(out_of_range, "out_of_range")
+    )
+    return rows.withColumn("reason", reason)
+
+
+def split(chunks: DataFrame) -> tuple[DataFrame, DataFrame]:
+    """Rows fit for silver, and the quarantined rows with their reason."""
+    rows = with_reason(with_time_columns(parse_chunks(chunks, keep_path=True)))
+    good = rows.where(F.col("reason").isNull()).drop("reason", "file_path")
+    bad = rows.where(F.col("reason").isNotNull()).select(*QUARANTINE_COLUMNS)
+    return good, bad.unionByName(unreadable(chunks))
 
 
 def with_time_columns(rows: DataFrame) -> DataFrame:
@@ -213,10 +335,22 @@ def log_revisions(revisions: DataFrame, table: str = REVISIONS_TABLE) -> int:
     return merged.first()["num_inserted_rows"]
 
 
+def log_quarantine(rows: DataFrame, table: str = QUARANTINE_TABLE) -> int:
+    """Add newly quarantined rows to the table, creating it on first use. Returns rows added."""
+    spark = rows.sparkSession
+    spark.sql(QUARANTINE_DDL.format(table=table))
+    rows.withColumn("quarantined_at", F.current_timestamp()).createOrReplaceTempView(
+        "smard_quarantine"
+    )
+    merged = spark.sql(QUARANTINE_MERGE_SQL.format(table=table, source="smard_quarantine"))
+    return merged.first()["num_inserted_rows"]
+
+
 def rebuild(spark: SparkSession, root: str = LANDING_ROOT, table: str = REBUILD_TABLE) -> None:
     """Replace `table` with silver replayed from every chunk in bronze."""
     spark.conf.set("spark.sql.session.timeZone", "UTC")
-    rows = rebuild_rows(with_time_columns(parse_chunks(read_chunks(spark, root))))
+    good, _ = split(read_chunks(spark, root))
+    rows = rebuild_rows(good)
     spark.sql(f"DROP TABLE IF EXISTS {table}")
     spark.sql(SILVER_DDL.format(table=table))
     rows.select(*spark.table(table).columns).writeTo(table).append()
@@ -247,18 +381,25 @@ def run(
     table: str = SILVER_TABLE,
     lookback: timedelta | None = timedelta(days=3),
     revisions_table: str = REVISIONS_TABLE,
+    quarantine_table: str = QUARANTINE_TABLE,
 ) -> dict:
     """Merge chunks landed within `lookback` (all of bronze if None) into silver, logging
-    each value it changes.
+    each value it changes and quarantining rows unfit for silver.
     """
     spark.conf.set("spark.sql.session.timeZone", "UTC")
     since = datetime.now(UTC) - lookback if lookback is not None else None
-    updates = latest_per_slot(with_time_columns(parse_chunks(read_chunks(spark, root, since))))
+    good, bad = split(read_chunks(spark, root, since))
+    quarantined = log_quarantine(bad, quarantine_table)
+    updates = latest_per_slot(good)
     # Logged before the MERGE overwrites the old values; a rerun after a failed MERGE
     # finds the same revisions and adds nothing.
     spark.sql(SILVER_DDL.format(table=table))
     logged = log_revisions(revised(updates, spark.table(table)), revisions_table)
-    return {**merge_into_silver(updates, table), "revisions_logged": logged}
+    return {
+        **merge_into_silver(updates, table),
+        "revisions_logged": logged,
+        "quarantined": quarantined,
+    }
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -285,8 +426,8 @@ def main(argv: list[str] | None = None) -> None:
     spark = SparkSession.builder.getOrCreate()
     if args.revisions_from_bronze:
         spark.conf.set("spark.sql.session.timeZone", "UTC")
-        rows = with_time_columns(parse_chunks(read_chunks(spark, args.root)))
-        print(f"revisions_logged={log_revisions(revision_history(rows), args.revisions_table)}")
+        good, _ = split(read_chunks(spark, args.root))
+        print(f"revisions_logged={log_revisions(revision_history(good), args.revisions_table)}")
         return
     if args.rebuild:
         rebuild(spark, args.root, args.table)
