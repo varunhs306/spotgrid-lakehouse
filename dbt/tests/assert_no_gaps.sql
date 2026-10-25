@@ -1,5 +1,8 @@
 -- Every hour between a series' first and last hourly slot in silver is present. A gap means a
 -- chunk failed to land or parse; the newest slots are not checked, as they grow with each run.
+-- Warns only: SMARD sometimes serves nulls for a whole day, and that must not hold gold back.
+{{ config(severity="warn") }}
+
 with series as (
     select series_id, region, min(ts_utc) as first_ts, max(ts_utc) as last_ts
     from {{ source("silver", "smard_timeseries") }}
