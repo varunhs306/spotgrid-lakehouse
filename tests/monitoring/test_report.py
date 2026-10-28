@@ -99,6 +99,64 @@ def test_api_down_fails_the_run():
     assert result["run"]["failed_step"] == "API check"
 
 
+def source_freshness(status="pending"):
+    return {
+        "source_snapshot": {
+            "freshness": {
+                "status": status,
+                "last_exported_at": "2026-10-12T15:21:00+00:00",
+                "series": [
+                    {
+                        "series": "PRICE_DE_LU",
+                        "resolution": "hour",
+                        "status": status,
+                        "historical": False,
+                        "pending": int(status == "pending"),
+                        "unknown": 0,
+                        "latest_source_ts": "2026-10-13T21:00:00+00:00",
+                        "pending_age_minutes": 60,
+                        "source_gaps": {},
+                        "error": None,
+                    }
+                ],
+            }
+        }
+    }
+
+
+def test_no_compute_is_skipped_and_still_reports_unpublished_data():
+    outcomes = OK | dict.fromkeys(("merge silver", "build gold", "export"), "skipped")
+    result = report(outcomes=outcomes, landing=LANDING | source_freshness())
+    assert result["run"]["status"] == "skipped"
+    assert result["source_freshness"]["status"] == "pending"
+    text = markdown(result)
+    assert "Source → publication" in text
+    assert "1 pending" in text
+    assert "60 min" in text
+
+
+def test_failed_processing_is_distinguished_from_source_freshness():
+    result = report(
+        outcomes=OK | {"merge silver": "failure", "export": "skipped"},
+        landing=LANDING | source_freshness(),
+    )
+    assert result["source_freshness"]["processing_blocked"]
+    assert "pending input versions have not been acknowledged" in markdown(result)
+
+
+def test_api_cache_does_not_look_like_a_confirmed_current_publication():
+    api = {"ok": True, "exported_at": "2026-10-12T05:20:00+00:00", "age_minutes": 600, "ms": 1}
+    result = report(landing=LANDING | source_freshness("up_to_date"), api=api)
+    assert result["source_freshness"]["api_publication"] == "cache_pending"
+    assert "cache_pending" in markdown(result)
+
+
+def test_newer_unacknowledged_api_export_is_not_treated_as_verified():
+    api = {"ok": True, "exported_at": "2026-10-12T16:00:00+00:00", "age_minutes": 0, "ms": 1}
+    result = report(landing=LANDING | source_freshness("up_to_date"), api=api)
+    assert result["source_freshness"]["api_publication"] == "unverified_export"
+
+
 def test_gaps_and_price_changes_become_findings():
     changes = [{"series_id": 4169, "local_date": date(2026, 10, 9), "inserted": 0, "revised": 2}]
 

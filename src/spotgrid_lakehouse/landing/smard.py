@@ -13,6 +13,7 @@ from zoneinfo import ZoneInfo
 from databricks.sdk import WorkspaceClient
 
 from spotgrid_lakehouse.landing.volume import LANDING_ROOT, DatabricksVolume, Volume
+from spotgrid_lakehouse.monitoring.freshness import SourceTracker
 from spotgrid_lakehouse.sources.smard import (
     Resolution,
     Series,
@@ -49,6 +50,7 @@ def land(
     starts: Iterable[int],
     region: str | None = None,
     now: Callable[[], datetime] = lambda: datetime.now(UTC),
+    observe: Callable[[int, bytes], None] | None = None,
 ) -> list[str]:
     """Fetch each chunk and write it unchanged, unless its bytes have landed before.
 
@@ -72,6 +74,8 @@ def land(
     written = []
     for start in starts:
         raw = client.chunk(series, resolution, start, region)
+        if observe is not None:
+            observe(start, raw)
         sha256 = hashlib.sha256(raw).hexdigest()
         if index["chunks"].get(str(start), {}).get("sha256") == sha256:
             continue
@@ -81,7 +85,11 @@ def land(
         )
         volume.write(f"{folder}/{name}", raw)
         written.append(f"{folder}/{name}")
-        index["chunks"][str(start)] = {"sha256": sha256, "fetch_date": fetch_date.isoformat()}
+        index["chunks"][str(start)] = {
+            "sha256": sha256,
+            "fetch_date": fetch_date.isoformat(),
+            "fetched_at": now().isoformat(),
+        }
         manifest["files"][name] = {
             "chunk_start_ms": start,
             "sha256": sha256,
@@ -154,14 +162,31 @@ def main(argv: list[str] | None = None) -> None:
 
     volume = DatabricksVolume(args.root, WorkspaceClient(profile=args.profile))
     landed = []
-    with SmardClient() as client:
-        for name in args.series:
-            for resolution in args.resolution:
-                series = Series[name]
-                starts = select_chunks(
-                    client.index(series, resolution), args.weeks, args.since, args.until
-                )
-                written = land(client, volume, series, resolution, starts)
+    selections = [
+        (Series[name], resolution) for name in args.series for resolution in args.resolution
+    ]
+    tracker = SourceTracker(volume, selections, datetime.now(UTC))
+    try:
+        with SmardClient() as client:
+            for series, resolution in selections:
+                try:
+                    starts = select_chunks(
+                        client.index(series, resolution), args.weeks, args.since, args.until
+                    )
+
+                    def observe(
+                        start: int,
+                        raw: bytes,
+                        series: Series = series,
+                        resolution: Resolution = resolution,
+                    ) -> None:
+                        tracker.observe(series, resolution, start, raw)
+
+                    written = land(client, volume, series, resolution, starts, observe=observe)
+                except Exception as exc:
+                    tracker.finish_source(series, resolution, type(exc).__name__)
+                    raise
+                tracker.finish_source(series, resolution)
                 skipped = len(starts) - len(written)
                 print(f"{series.name} {resolution}: wrote {len(written)}, skipped {skipped}")
                 landed.append(
@@ -174,8 +199,13 @@ def main(argv: list[str] | None = None) -> None:
                         "dates": chunk_dates(starts),
                     }
                 )
-    if args.report:
-        args.report.write_text(json.dumps({"landed": landed}, indent=2))
+    finally:
+        # Even an upstream outage must leave an explicit unknown status for the report.
+        snapshot = tracker.snapshot()
+        if args.report:
+            args.report.write_text(
+                json.dumps({"landed": landed, "source_snapshot": snapshot}, indent=2)
+            )
 
 
 if __name__ == "__main__":

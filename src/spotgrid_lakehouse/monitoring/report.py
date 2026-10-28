@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import time
+from contextlib import suppress
 from dataclasses import asdict
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -27,7 +28,7 @@ from spotgrid_lakehouse.sources.smard import Series
 SILVER = "workspace.silver.smard_timeseries"
 QUARANTINE = "workspace.silver.quarantine"
 # Step names in .github/workflows/daily.yml, in run order.
-STEPS = ("land bronze", "merge silver", "build gold", "export")
+STEPS = ("land bronze", "merge silver", "build gold", "export", "record published source versions")
 # Clean SMARD data quarantines nothing; a day of one series means something changed upstream.
 QUARANTINE_SPIKE = 24
 ICONS = {"success": "✅", "failure": "❌", "cancelled": "⛔", "skipped": "⏭️"}
@@ -108,16 +109,21 @@ def check_api(
         day = None
         if response.status_code == 200 and tomorrow is not None:
             params = {"start": tomorrow.isoformat(), "end": tomorrow.isoformat()}
-            rows = http.get(f"{base}/v1/prices/daily", params=params).json().get("rows", [])
+            prices = http.get(f"{base}/v1/prices/daily", params=params)
+            prices.raise_for_status()
+            rows = prices.json().get("rows", [])
             day = rows[0] if rows else None
-    except httpx.HTTPError as exc:
+        body = response.json() if response.status_code == 200 else {}
+        if not isinstance(body, dict):
+            raise ValueError("Invalid freshness response")
+    except (httpx.HTTPError, ValueError) as exc:
         return {"ok": False, "error": type(exc).__name__}
-    body = response.json() if response.status_code == 200 else {}
     return {
         "ok": response.status_code == 200,
         "status": response.status_code,
         "ms": ms,
         "age_minutes": body.get("age_minutes"),
+        "exported_at": body.get("exported_at"),
         "tomorrow": day,
     }
 
@@ -163,12 +169,39 @@ def build(
             (r["series_id"], r["local_date"], r["revised"]) for r in silver_changes
         )
 
+    source_freshness = dict(
+        (landing or {}).get("source_snapshot", {}).get("freshness")
+        or {
+            "status": "unknown",
+            "series": [],
+            "error": "Source detection report unavailable",
+        }
+    )
+    source_freshness["processing_blocked"] = failed in STEPS[:4]
+    source_freshness["api_publication"] = "unknown"
+    published = source_freshness.get("last_exported_at")
+    served = (api or {}).get("exported_at")
+    if published and served and (api or {}).get("ok"):
+        with suppress(ValueError, TypeError):
+            served_at, acknowledged_at = (
+                datetime.fromisoformat(served),
+                datetime.fromisoformat(published),
+            )
+            if served_at == acknowledged_at:
+                source_freshness["api_publication"] = "current"
+            elif served_at < acknowledged_at:
+                source_freshness["api_publication"] = "cache_pending"
+            else:
+                source_freshness["api_publication"] = "unverified_export"
+
     return {
         "run": {
             **run,
             "started_at": started_at.isoformat(),
             "seconds": int((now - started_at).total_seconds()),
-            "status": "failure" if failed else "success",
+            "status": "failure"
+            if failed
+            else ("success" if outcomes.get("export") == "success" else "skipped"),
             "failed_step": failed,
         },
         "steps": steps,
@@ -180,6 +213,7 @@ def build(
         "api": api,
         "complete": complete,
         "findings": [asdict(f) for f in findings],
+        "source_freshness": source_freshness,
     }
 
 
@@ -250,6 +284,48 @@ def markdown(report: dict, issues: dict[str, str] | None = None) -> str:
             else f"❌ {api.get('status') or api.get('error')}"
         )
         lines += ["", "### API", "", state]
+
+    if freshness := report.get("source_freshness"):
+        lines += [
+            "",
+            "### Source → publication (no warehouse check)",
+            "",
+            f"Status: **{freshness['status']}**",
+        ]
+        if freshness.get("processing_blocked"):
+            lines.append("Processing failed; pending input versions have not been acknowledged.")
+        if freshness.get("error"):
+            lines.append(f"Unknown: {freshness['error']}")
+        lines += [
+            "",
+            "| Series / resolution | Publication | Latest slot (UTC) | Pending age | Source gaps |",
+            "|---|---|---|---|---|",
+        ]
+        for row in freshness["series"]:
+            label = f"{row['series']} / {row['resolution']}"
+            if row["historical"]:
+                label += " (historical)"
+            gaps = list(row["source_gaps"].items())
+            details = (
+                ", ".join(f"{day}: {slots}" for day, slots in gaps[:3]) or "none in checked days"
+            )
+            if len(gaps) > 3:
+                details += f", +{len(gaps) - 3} days"
+            age = row["pending_age_minutes"]
+            latest = row["latest_source_ts"] or "no filled slots"
+            note = f"{row['status']} ({row['pending']} pending, {row['unknown']} unverified)"
+            if row.get("error"):
+                note += f"; {row['error']}"
+            age_label = f"{age} min" if age is not None else "-"
+            lines.append(f"| {label} | {note} | {latest} | {age_label} | {details} |")
+        lines += [
+            "",
+            "Publication compares meaningful source versions with acknowledged export inputs.",
+            "Source gaps and export age are separate checks. Unrecorded baselines stay unknown.",
+            "Only polled source periods are verified; pending known older versions remain visible.",
+            "API manifest versus acknowledged export: "
+            f"{freshness.get('api_publication', 'unknown')}.",
+        ]
 
     lines += ["", "### Irregularities", ""]
     if not report["findings"]:

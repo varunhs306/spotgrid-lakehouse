@@ -123,7 +123,10 @@ def main(argv: list[str] | None = None, env: dict | None = None) -> None:
     if token and repo and not args.dry_run:
         github = GitHubIssues(repo, token)
         github.ensure_labels()
-        changes += sync_incident(github, report["run"]["failed_step"], run_url, now)
+        # A skipped run proves no processing recovery. An export whose provenance write
+        # failed is not a verified recovery either (the failure is a named report step).
+        if report["run"]["failed_step"] or outcomes.get("export") == "success":
+            changes += sync_incident(github, report["run"]["failed_step"], run_url, now)
         if report["run"]["status"] == "success" and coverage is not None:
             found, links = sync_findings(github, report["findings"], run_url, now)
             changes += found
@@ -143,9 +146,20 @@ def main(argv: list[str] | None = None, env: dict | None = None) -> None:
     if bot_token and chat_id and not args.dry_run:
         bot = Telegram(bot_token, chat_id)
         issues = sorted((int(url.rsplit("/", 1)[1]), url) for url in links.values())
-        problem = report["run"]["status"] == "failure" or report["findings"] or changes
+        problem = (
+            report["run"]["status"] == "failure"
+            or report["findings"]
+            or changes
+            or report["source_freshness"]["status"] != "up_to_date"
+            or any(row.get("source_gaps") for row in report["source_freshness"]["series"])
+        )
         try:
-            if problem or not quiet(report["run"]["trigger"], now):
+            quiet_poll = env.get("QUIET_POLL") == "true"
+            if (
+                report["run"]["status"] == "failure"
+                or changes
+                or (not quiet_poll and (problem or not quiet(report["run"]["trigger"], now)))
+            ):
                 bot.send(digest(report, issues, incident))
             for change in changes:
                 if message := change_message(change):

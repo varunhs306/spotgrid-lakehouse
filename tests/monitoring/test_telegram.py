@@ -90,6 +90,21 @@ def test_digest_with_a_data_problem():
     assert f'Open issues: 🟠 1 (<a href="{ISSUE}">#9</a>)' in text
 
 
+def test_digest_reports_source_lag_on_a_skipped_poll():
+    result = report(status="skipped")
+    result["source_freshness"] = {
+        "status": "pending",
+        "api_publication": "cache_pending",
+        "series": [{"historical": False, "pending": 2, "unknown": 1, "pending_age_minutes": 90}],
+    }
+    text = digest(result, issues=[])
+    assert "processing skipped" in text
+    assert "Source → publication: pending" in text
+    assert "2 pending, 1 unverified" in text
+    assert "Oldest pending: 90 min" in text
+    assert "cache refresh pending" in text
+
+
 def test_long_problem_lists_are_cut():
     problems = {f"2026-10-0{d}": "0/24 h" for d in range(1, 6)}
     complete = COMPLETE | {

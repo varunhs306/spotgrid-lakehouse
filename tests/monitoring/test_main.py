@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 from spotgrid_lakehouse.monitoring.__main__ import main
 
 
@@ -54,3 +56,32 @@ def test_tomorrow_and_quiet_mornings():
     assert quiet("schedule", morning)
     assert not quiet("schedule", afternoon)
     assert not quiet("workflow_dispatch", morning)
+
+
+def test_skipped_processing_cannot_close_an_incident(monkeypatch):
+    from spotgrid_lakehouse.monitoring import __main__ as monitoring
+
+    class GitHub:
+        def ensure_labels(self):
+            pass
+
+        def open_issues(self, label):
+            return []
+
+    monkeypatch.setattr(monitoring, "GitHubIssues", lambda *args: GitHub())
+
+    def unexpected_recovery(*args):
+        pytest.fail("A no-compute poll must not resolve an existing incident")
+
+    monkeypatch.setattr(monitoring, "sync_incident", unexpected_recovery)
+    main(
+        [
+            "--started-at",
+            "2026-10-27T05:00:00+00:00",
+            "--outcome",
+            "land bronze=success",
+            "--outcome",
+            "export=skipped",
+        ],
+        env={"GITHUB_TOKEN": "test-only", "GITHUB_REPOSITORY": "o/r"},
+    )
