@@ -19,6 +19,7 @@ STEP_LABELS = {
     "merge silver": "Silver",
     "build gold": "Gold",
     "export": "Export",
+    "record published source versions": "Publication provenance",
 }
 OUTCOMES = {"success": "✅", "failure": "❌", "cancelled": "⛔ cancelled", "skipped": "⏭ skipped"}
 # Problems listed per group before the rest is summed up.
@@ -65,6 +66,27 @@ def digest(
     """`issues` are the open data-quality issues as (number, url); `incident` the open one."""
     run = report["run"]
     when = datetime.fromisoformat(run["started_at"]).astimezone(BERLIN).strftime("%a %d %b, %H:%M")
+    source_lines = []
+    if freshness := report.get("source_freshness"):
+        rows = [row for row in freshness["series"] if not row["historical"]]
+        pending = sum(row["pending"] for row in rows)
+        unknown = sum(row["unknown"] for row in rows)
+        source_lines = [
+            f"Source → publication: {escape(freshness['status'])}",
+            f"Input chunks: {pending} pending, {unknown} unverified",
+        ]
+        ages = [
+            row["pending_age_minutes"] for row in rows if row["pending_age_minutes"] is not None
+        ]
+        if ages:
+            source_lines.append(f"Oldest pending: {age(max(ages))}")
+        incomplete = sum(len(row.get("source_gaps", {})) for row in rows)
+        if incomplete:
+            source_lines.append(f"Incomplete source days: {incomplete} (per series/resolution)")
+        if freshness.get("api_publication") == "cache_pending":
+            source_lines.append("API manifest: previous export (cache refresh pending)")
+        elif freshness.get("api_publication") != "current":
+            source_lines.append("API publication: unverified")
 
     if run["status"] == "failure":
         lines = ["❌ <b>spotgrid daily FAILED</b>", f"Time: {when}"]
@@ -80,11 +102,23 @@ def digest(
             lines.append(f"API: ❌ down ({api.get('status') or api.get('error')})")
         if incident:
             lines.append(f"Incident: 🔴 {link(incident[1], f'#{incident[0]}')}")
-        return "\n".join([*lines, "", link(run["url"], "Run log")])
+        return "\n".join([*lines, *source_lines, "", link(run["url"], "Run log")])
 
-    healthy = not report["findings"] and not issues
+    healthy = (
+        not report["findings"]
+        and not issues
+        and (
+            not report.get("source_freshness")
+            or (
+                report["source_freshness"]["status"] == "up_to_date"
+                and report["source_freshness"].get("api_publication") == "current"
+                and not any(row.get("source_gaps") for row in report["source_freshness"]["series"])
+            )
+        )
+    )
     lines = [f"{'✅' if healthy else '⚠️'} <b>spotgrid daily</b>", f"Time: {when}"]
-    lines += [f"Duration: {duration(run['seconds'])}", "Pipeline: ✅ all steps passed"]
+    pipeline = "⏭ processing skipped" if run["status"] == "skipped" else "✅ all steps passed"
+    lines += [f"Duration: {duration(run['seconds'])}", f"Pipeline: {pipeline}", *source_lines]
     if report["silver"] is not None:
         lines.append(f"New rows: {sum(s['inserted'] for s in report['silver']):,}")
         lines.append(f"Changed values: {sum(s['revised'] for s in report['silver']):,}")

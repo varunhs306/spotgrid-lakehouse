@@ -107,15 +107,24 @@ jobs:
           uv run --no-dev python -m spotgrid_lakehouse.export.gold
           --report "$RUNNER_TEMP/manifest.json"
 
-      # Runs after failures too: the summary, the issues and the Telegram digest. A poll with
-      # nothing new stays silent; a run without compute skips the warehouse checks.
+      - id: provenance
+        name: record published source versions
+        if: steps.export.outcome == 'success'
+        timeout-minutes: 2
+        run: >-
+          uv run --no-dev python -m spotgrid_lakehouse.monitoring.freshness
+          --landing "$RUNNER_TEMP/landing.json" --manifest "$RUNNER_TEMP/manifest.json"
+
+      # Every poll gets a source-versus-publication summary through file metadata only.
+      # Quiet polls retain the existing Telegram silence. Query the warehouse only after
+      # gold already used it successfully, never as a way to discover source freshness.
       - name: report and alerts
         if: >-
           always() && steps.start.outcome == 'success'
-          && (env.POLL != 'true' || steps.new.outputs.data != 'false')
         timeout-minutes: 5
         env:
-          DATABRICKS_HTTP_PATH: ${{ steps.new.outputs.data == 'true' && vars.DATABRICKS_HTTP_PATH || '' }}
+          DATABRICKS_HTTP_PATH: ${{ steps.gold.outcome == 'success' && vars.DATABRICKS_HTTP_PATH || '' }}
+          QUIET_POLL: ${{ env.POLL == 'true' && steps.new.outputs.data == 'false' }}
           GITHUB_TOKEN: ${{ github.token }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
@@ -129,6 +138,7 @@ jobs:
           --outcome "merge silver=${{ steps.silver.outcome }}"
           --outcome "build gold=${{ steps.gold.outcome }}"
           --outcome "export=${{ steps.export.outcome }}"
+          --outcome "record published source versions=${{ steps.provenance.outcome }}"
 
       # Free Edition can't lower the warehouse's 10-minute auto-stop; idle time was about
       # two thirds of its cost. Last, so the report's queries are done.
