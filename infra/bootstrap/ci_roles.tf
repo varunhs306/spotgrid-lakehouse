@@ -10,6 +10,11 @@ locals {
   workload_role = "arn:aws:iam::${local.account_id}:role/spotgrid-*"
   workload_pol  = "arn:aws:iam::${local.account_id}:policy/spotgrid-*"
   boundary_arn  = "arn:aws:iam::${local.account_id}:policy/spotgrid-workload-boundary"
+
+  # Certificate and distribution IDs are generated, so these cover the whole account.
+  certificates   = "${format(local.arn_prefix, "acm")}:certificate/*"
+  distributions  = "arn:aws:cloudfront::${local.account_id}:distribution/*"
+  cache_policies = "arn:aws:cloudfront::${local.account_id}:cache-policy/*"
 }
 
 data "aws_iam_policy_document" "github_trust" {
@@ -108,6 +113,18 @@ data "aws_iam_policy_document" "ci_read" {
     actions   = ["sns:GetTopicAttributes", "sns:GetSubscriptionAttributes", "sns:ListSubscriptionsByTopic", "sns:ListTagsForResource"]
     resources = ["${format(local.arn_prefix, "sns")}:spotgrid-*"]
   }
+
+  statement {
+    sid       = "ReadCertificates"
+    actions   = ["acm:DescribeCertificate", "acm:ListTagsForCertificate"]
+    resources = [local.certificates]
+  }
+
+  statement {
+    sid       = "ReadCdn"
+    actions   = ["cloudfront:GetDistribution", "cloudfront:GetDistributionConfig", "cloudfront:ListTagsForResource", "cloudfront:GetCachePolicy", "cloudfront:GetCachePolicyConfig"]
+    resources = [local.distributions, local.cache_policies]
+  }
 }
 
 data "aws_iam_policy_document" "ci_write" {
@@ -151,6 +168,22 @@ data "aws_iam_policy_document" "ci_write" {
     sid       = "ManageSns"
     actions   = ["sns:*"]
     resources = ["${format(local.arn_prefix, "sns")}:spotgrid-*"]
+  }
+
+  statement {
+    sid       = "ManageCertificates"
+    actions   = ["acm:RequestCertificate", "acm:DeleteCertificate", "acm:AddTagsToCertificate", "acm:RemoveTagsFromCertificate"]
+    resources = [local.certificates]
+  }
+
+  statement {
+    sid = "ManageCdn"
+    actions = [
+      "cloudfront:CreateDistribution", "cloudfront:CreateDistributionWithTags", "cloudfront:UpdateDistribution", "cloudfront:DeleteDistribution",
+      "cloudfront:TagResource", "cloudfront:UntagResource",
+      "cloudfront:CreateCachePolicy", "cloudfront:UpdateCachePolicy", "cloudfront:DeleteCachePolicy",
+    ]
+    resources = [local.distributions, local.cache_policies]
   }
 
   statement {
