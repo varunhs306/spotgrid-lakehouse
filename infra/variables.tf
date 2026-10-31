@@ -22,3 +22,8 @@ variable "api_zip" {
   description = "API Lambda zip built by scripts/build_lambda.py"
   default     = "../build/api-lambda.zip"
 }
+
+variable "api_domain" {
+  type    = string
+  default = "api.spotgrid.quarrylabs.dev"
+}
