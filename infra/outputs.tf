@@ -22,9 +22,8 @@ output "api_custom_url" {
   value = "https://${var.api_domain}/"
 }
 
-# The CNAME target for var.api_domain at name.com.
-output "api_cdn_domain" {
-  value = aws_cloudfront_distribution.api.domain_name
+output "api_dns_target" {
+  value = var.api_cdn ? aws_cloudfront_distribution.api[0].domain_name : aws_apigatewayv2_domain_name.api[0].domain_name_configuration[0].target_domain_name
 }
 
 output "api_cert_validation" {
