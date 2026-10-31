@@ -15,6 +15,7 @@ locals {
   certificates   = "${format(local.arn_prefix, "acm")}:certificate/*"
   distributions  = "arn:aws:cloudfront::${local.account_id}:distribution/*"
   cache_policies = "arn:aws:cloudfront::${local.account_id}:cache-policy/*"
+  http_apis      = [for path in ["/apis", "/apis/*", "/domainnames", "/domainnames/*", "/tags/*"] : "arn:aws:apigateway:${var.region}::${path}"]
 }
 
 data "aws_iam_policy_document" "github_trust" {
@@ -125,6 +126,12 @@ data "aws_iam_policy_document" "ci_read" {
     actions   = ["cloudfront:GetDistribution", "cloudfront:GetDistributionConfig", "cloudfront:ListTagsForResource", "cloudfront:GetCachePolicy", "cloudfront:GetCachePolicyConfig"]
     resources = [local.distributions, local.cache_policies]
   }
+
+  statement {
+    sid       = "ReadHttpApis"
+    actions   = ["apigateway:GET"]
+    resources = local.http_apis
+  }
 }
 
 data "aws_iam_policy_document" "ci_write" {
@@ -184,6 +191,12 @@ data "aws_iam_policy_document" "ci_write" {
       "cloudfront:CreateCachePolicy", "cloudfront:UpdateCachePolicy", "cloudfront:DeleteCachePolicy",
     ]
     resources = [local.distributions, local.cache_policies]
+  }
+
+  statement {
+    sid       = "ManageHttpApis"
+    actions   = ["apigateway:GET", "apigateway:POST", "apigateway:PUT", "apigateway:PATCH", "apigateway:DELETE", "apigateway:AddCertificateToDomain", "apigateway:RemoveCertificateFromDomain"]
+    resources = local.http_apis
   }
 
   statement {

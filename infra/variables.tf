@@ -27,3 +27,8 @@ variable "api_domain" {
   type    = string
   default = "api.spotgrid.quarrylabs.dev"
 }
+
+variable "api_cdn" {
+  type    = bool
+  default = false
+}

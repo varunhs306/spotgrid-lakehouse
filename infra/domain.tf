@@ -1,6 +1,4 @@
-# Custom domain for the API: CloudFront in front of the function URL, which cannot take a
-# domain itself. DNS lives at name.com, so both records there are added by hand:
-# the certificate's validation CNAME (api_cert_validation) and the CNAME to CloudFront (api_cdn_domain).
+# Custom domain for the API. DNS records are added by hand at name.com.
 
 resource "aws_acm_certificate" "api" {
   domain_name       = var.api_domain
@@ -11,8 +9,6 @@ resource "aws_acm_certificate" "api" {
   }
 }
 
-# ACM reuses one validation CNAME per domain and account, so a record added before the
-# first apply validates this certificate at once.
 resource "aws_acm_certificate_validation" "api" {
   certificate_arn = aws_acm_certificate.api.arn
 
@@ -21,9 +17,7 @@ resource "aws_acm_certificate_validation" "api" {
   }
 }
 
-# The API sets Cache-Control (5 minutes) on data responses; anything without it is not cached.
-# Origin is in the key so a cached CORS header always matches the caller. Host must not be:
-# a function URL rejects any Host but its own.
+# Host is not forwarded: a function URL rejects any Host but its own.
 resource "aws_cloudfront_cache_policy" "api" {
   name        = "spotgrid-api"
   default_ttl = 0
@@ -59,6 +53,8 @@ resource "aws_cloudfront_distribution" "api" {
   #checkov:skip=CKV_AWS_374:Open data for any country
   #checkov:skip=CKV2_AWS_32:JSON API; browser security headers protect HTML pages
   #checkov:skip=CKV_AWS_305:No root object; the API serves its own routes
+  count = var.api_cdn ? 1 : 0
+
   enabled         = true
   is_ipv6_enabled = true
   comment         = "spotgrid-api"
@@ -84,7 +80,7 @@ resource "aws_cloudfront_distribution" "api" {
     cached_methods         = ["GET", "HEAD"]
     compress               = true
     cache_policy_id        = aws_cloudfront_cache_policy.api.id
-    # Managed AllViewerExceptHostHeader: everything the caller sent except Host.
+    # Managed AllViewerExceptHostHeader
     origin_request_policy_id = "b689b0a8-53d0-40ab-baf2-68738e2966ac"
   }
 
@@ -99,4 +95,79 @@ resource "aws_cloudfront_distribution" "api" {
     ssl_support_method       = "sni-only"
     minimum_protocol_version = "TLSv1.2_2021"
   }
+}
+
+resource "aws_apigatewayv2_api" "api" {
+  count = var.api_cdn ? 0 : 1
+
+  name          = "spotgrid-api"
+  protocol_type = "HTTP"
+
+  cors_configuration {
+    allow_origins = ["*"]
+    allow_methods = ["GET"]
+    max_age       = 86400
+  }
+}
+
+resource "aws_apigatewayv2_integration" "api" {
+  count = var.api_cdn ? 0 : 1
+
+  api_id                 = aws_apigatewayv2_api.api[0].id
+  integration_type       = "AWS_PROXY"
+  integration_uri        = aws_lambda_function.api.invoke_arn
+  payload_format_version = "2.0"
+}
+
+resource "aws_apigatewayv2_route" "api" {
+  #checkov:skip=CKV_AWS_309:Public read-only API over open data (CC BY 4.0)
+  count = var.api_cdn ? 0 : 1
+
+  api_id    = aws_apigatewayv2_api.api[0].id
+  route_key = "$default"
+  target    = "integrations/${aws_apigatewayv2_integration.api[0].id}"
+}
+
+resource "aws_apigatewayv2_stage" "api" {
+  #checkov:skip=CKV_AWS_76:Lambda logs every request already
+  count = var.api_cdn ? 0 : 1
+
+  api_id      = aws_apigatewayv2_api.api[0].id
+  name        = "$default"
+  auto_deploy = true
+
+  default_route_settings {
+    throttling_rate_limit  = 20
+    throttling_burst_limit = 50
+  }
+}
+
+resource "aws_lambda_permission" "api_gateway" {
+  count = var.api_cdn ? 0 : 1
+
+  statement_id  = "ApiGateway"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.api.function_name
+  principal     = "apigateway.amazonaws.com"
+  source_arn    = "${aws_apigatewayv2_api.api[0].execution_arn}/*/*"
+}
+
+resource "aws_apigatewayv2_domain_name" "api" {
+  count = var.api_cdn ? 0 : 1
+
+  domain_name = var.api_domain
+
+  domain_name_configuration {
+    certificate_arn = aws_acm_certificate_validation.api.certificate_arn
+    endpoint_type   = "REGIONAL"
+    security_policy = "TLS_1_2"
+  }
+}
+
+resource "aws_apigatewayv2_api_mapping" "api" {
+  count = var.api_cdn ? 0 : 1
+
+  api_id      = aws_apigatewayv2_api.api[0].id
+  domain_name = aws_apigatewayv2_domain_name.api[0].id
+  stage       = aws_apigatewayv2_stage.api[0].id
 }
