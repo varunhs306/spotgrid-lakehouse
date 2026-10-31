@@ -195,7 +195,7 @@ data "aws_iam_policy_document" "ci_write" {
 
   statement {
     sid       = "ManageHttpApis"
-    actions   = ["apigateway:GET", "apigateway:POST", "apigateway:PUT", "apigateway:PATCH", "apigateway:DELETE", "apigateway:AddCertificateToDomain", "apigateway:RemoveCertificateFromDomain"]
+    actions   = ["apigateway:GET", "apigateway:POST", "apigateway:PUT", "apigateway:PATCH", "apigateway:DELETE", "apigateway:TagResource", "apigateway:UntagResource", "apigateway:AddCertificateToDomain", "apigateway:RemoveCertificateFromDomain"]
     resources = local.http_apis
   }
 
@@ -298,4 +298,8 @@ resource "aws_iam_role_policy" "ci_write" {
   name   = "write"
   role   = aws_iam_role.ci["apply"].id
   policy = data.aws_iam_policy_document.ci_write.json
+}
+
+resource "aws_iam_service_linked_role" "apigateway" {
+  aws_service_name = "ops.apigateway.amazonaws.com"
 }
