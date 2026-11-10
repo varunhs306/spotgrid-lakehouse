@@ -1,11 +1,11 @@
 name: docs
 
 # dbt docs for the gold and silver tables, at /dbt/ on GitHub Pages. Rebuilt when the dbt
-# project changes on main; the catalog reads column types from the warehouse.
+# project changes on main. Column types come from the model YAML, not a warehouse.
 on:
   push:
     branches: [main]
-    paths: ["dbt/**"]
+    paths: ["dbt/**", "src/spotgrid_lakehouse/sources/catalog.py"]
   workflow_dispatch:
 
 permissions:
@@ -19,30 +19,21 @@ jobs:
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    env:
-      DATABRICKS_HOST: ${{ vars.DATABRICKS_HOST }}
-      DATABRICKS_HTTP_PATH: ${{ vars.DATABRICKS_HTTP_PATH }}
-      DATABRICKS_CLIENT_ID: ${{ vars.DATABRICKS_CLIENT_ID }}
-      DATABRICKS_CLIENT_SECRET: ${{ secrets.DATABRICKS_CLIENT_SECRET }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
-      - uses: databricks/setup-cli@9230f12203ef173d0b901846f62a55ce997efef7 # v1.19.0
+      - run: uv sync --locked --no-dev --group pipeline
       - name: generate
-        working-directory: dbt
         timeout-minutes: 10
+        env:
+          WAREHOUSE: ${{ runner.temp }}/docs.duckdb
         run: |
-          uvx --from dbt-core==1.12.5 --with dbt-databricks==1.12.6 \
-            dbt docs generate --static --profiles-dir . --target ci
-          mkdir -p ../site/dbt
-          cp target/static_index.html ../site/dbt/index.html
+          uv run --no-dev python -m spotgrid_lakehouse.gold docs generate --static --empty-catalog
+          mkdir -p site/dbt
+          cp dbt/target/static_index.html site/dbt/index.html
       - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         with:
           path: site
-      - name: stop warehouse
-        if: always()
-        timeout-minutes: 2
-        run: databricks warehouses stop "${DATABRICKS_HTTP_PATH##*/}" --no-wait
 
   deploy:
     needs: build
