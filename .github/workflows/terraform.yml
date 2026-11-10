@@ -8,6 +8,8 @@ on:
       - "scripts/build_lambda.py"
       - "pyproject.toml"
       - "uv.lock"
+      - "dbt/**"
+      - "Dockerfile"
       - ".github/workflows/terraform.yml"
   push:
     branches: [main]
@@ -17,6 +19,8 @@ on:
       - "scripts/build_lambda.py"
       - "pyproject.toml"
       - "uv.lock"
+      - "dbt/**"
+      - "Dockerfile"
       - ".github/workflows/terraform.yml"
 
 permissions:
@@ -31,6 +35,7 @@ env:
   TF_IN_AUTOMATION: "1"
   TF_INPUT: "0"
   TF_VAR_alarm_email: ${{ secrets.ALARM_EMAIL }}
+  TF_VAR_pipeline_image_tag: ${{ github.sha }}
 
 jobs:
   check:
@@ -53,7 +58,7 @@ jobs:
       - name: checkov
         run: uvx --from checkov==3.3.26 checkov -d infra --framework terraform --quiet --compact
 
-  # infra/bootstrap is applied once from a laptop (docs/runbooks/aws-bootstrap.md), never by CI.
+  # infra/bootstrap is applied from a laptop with an admin profile, never by CI.
   plan:
     if: github.event_name == 'pull_request'
     needs: check
@@ -72,7 +77,7 @@ jobs:
       - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
         with:
           role-to-assume: ${{ vars.AWS_PLAN_ROLE_ARN }}
-          aws-region: us-east-1
+          aws-region: eu-central-1
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
       - run: uv run --no-project python scripts/build_lambda.py
       - run: terraform -chdir=infra init -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}"
@@ -108,7 +113,7 @@ jobs:
       - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
         with:
           role-to-assume: ${{ vars.AWS_APPLY_ROLE_ARN }}
-          aws-region: us-east-1
+          aws-region: eu-central-1
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
       - run: uv run --no-project python scripts/build_lambda.py
       - run: terraform -chdir=infra init -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}"
@@ -120,9 +125,18 @@ jobs:
           aws s3 cp build/api-lambda.zip "s3://$bucket/$key" --only-show-errors
       - run: terraform -chdir=infra plan -lock-timeout=2m -out=tfplan
       - run: terraform -chdir=infra apply -lock-timeout=2m tfplan
+      # The task definition names the image by commit; tags are immutable.
+      - name: push pipeline image
+        run: |
+          repo=$(terraform -chdir=infra output -raw pipeline_repository_url)
+          aws ecr get-login-password | docker login --username AWS --password-stdin "${repo%%/*}"
+          if ! aws ecr describe-images --repository-name "${repo#*/}" --image-ids imageTag="$GITHUB_SHA" > /dev/null 2>&1; then
+            docker build --tag "$repo:$GITHUB_SHA" .
+            docker push "$repo:$GITHUB_SHA"
+          fi
       # The schema route loads the app without touching data, so it proves the zip runs.
       - name: smoke test
         run: |
-          url=$(terraform -chdir=infra output -raw api_url)
-          curl --fail --silent --show-error --retry 3 --retry-all-errors "${url}openapi.json" > /dev/null
+          url=$(terraform -chdir=infra output -raw api_endpoint)
+          curl --fail --silent --show-error --retry 3 --retry-all-errors "${url}/openapi.json" > /dev/null
           echo "API live at $url" >> "$GITHUB_STEP_SUMMARY"
