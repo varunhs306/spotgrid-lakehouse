@@ -1,405 +1,447 @@
-"""SMARD chunks from the bronze volume to silver time-series rows."""
+"""SMARD chunks from bronze to silver time-series rows, in the DuckDB warehouse."""
 
 from __future__ import annotations
 
 import argparse
-from datetime import UTC, datetime, timedelta
+import json
+import os
+import re
+from collections.abc import Iterable, Iterator
+from concurrent.futures import ThreadPoolExecutor
+from datetime import UTC, date, datetime, timedelta
+from itertools import groupby
 
-from pyspark.sql import DataFrame, SparkSession, Window
-from pyspark.sql import functions as F
+import duckdb
+import pyarrow as pa
 
-from spotgrid_lakehouse.landing.volume import LANDING_ROOT
-from spotgrid_lakehouse.sources.smard import Resolution, Series
+from spotgrid_lakehouse.landing.volume import Volume, open_volume
+from spotgrid_lakehouse.sources.catalog import BY_ID, Kind
 
-SILVER_TABLE = "workspace.silver.smard_timeseries"
-REBUILD_TABLE = "workspace.silver.smard_timeseries_rebuild"
-REVISIONS_TABLE = "workspace.silver.revisions"
-QUARANTINE_TABLE = "workspace.silver.quarantine"
-# The JSON body of one chunk file; meta_data is not needed downstream.
-CHUNK_SCHEMA = "series ARRAY<ARRAY<DOUBLE>>"
-# Chunk files start with the series id; this skips _manifest.json and _index.json.
-CHUNK_GLOB = "[0-9]*.json"
-# smard/{series}/{region}/{resolution}/fetch_date=YYYY-MM-DD/{chunk}.json, as written by landing.
-PATH_PATTERN = r"/smard/(\d+)/([^/]+)/([a-z]+)/fetch_date=[^/]+/[^/]+\.json$"
-# Market days and the daily summaries follow German local time.
-LOCAL_TZ = "Europe/Berlin"
+SILVER_TABLE = "silver.smard_timeseries"
+REBUILD_TABLE = "silver.smard_timeseries_rebuild"
+REVISIONS_TABLE = "silver.revisions"
+QUARANTINE_TABLE = "silver.quarantine"
+# smard/{series}/{region}/{resolution}/fetch_date=YYYY-MM-DD/{chunk}_HHMMSS.json, as landed.
+PATH = re.compile(
+    r"smard/(\d+)/([^/]+)/([a-z]+)/fetch_date=(\d{4}-\d{2}-\d{2})/\d[^/]*?(?:_(\d{6}))?\.json$"
+)
 KEY = ["series_id", "region", "resolution", "ts_utc"]
+LINEAGE = ", ".join(
+    [*KEY, "local_date", "value", "first_seen_at", "last_changed_at", "revision_count"]
+)
+SLOT_MS = {"hour": 3_600_000, "quarterhour": 900_000}
+# Forecasts and prices reach a day or two past the landing; further is a bad timestamp.
+MAX_LEAD_DAYS = 3
+BATCH_FILES = 2000
 
 SILVER_DDL = """
 CREATE TABLE IF NOT EXISTS {table} (
-  series_id INT NOT NULL COMMENT 'SMARD series id, e.g. 4169 = day-ahead price DE-LU',
-  region STRING NOT NULL,
-  resolution STRING NOT NULL COMMENT 'hour or quarterhour',
-  ts_utc TIMESTAMP NOT NULL COMMENT 'Slot start',
-  local_date DATE NOT NULL COMMENT 'Slot start date in Europe/Berlin',
-  value DOUBLE NOT NULL COMMENT 'EUR/MWh for prices, MWh per slot for volumes',
-  first_seen_at TIMESTAMP NOT NULL COMMENT 'Landing time of the first chunk with this slot',
-  last_changed_at TIMESTAMP NOT NULL COMMENT 'Landing time of the chunk that set the value',
-  revision_count INT NOT NULL COMMENT 'Times the published value changed'
+  series_id INTEGER NOT NULL,
+  region VARCHAR NOT NULL,
+  resolution VARCHAR NOT NULL,
+  ts_utc TIMESTAMPTZ NOT NULL,
+  local_date DATE NOT NULL,
+  value DOUBLE NOT NULL,
+  first_seen_at TIMESTAMPTZ NOT NULL,
+  last_changed_at TIMESTAMPTZ NOT NULL,
+  revision_count INTEGER NOT NULL,
+  -- When spotgrid last wrote the row; incremental gold reads changes after it.
+  merged_at TIMESTAMPTZ NOT NULL
 )
-USING DELTA
-COMMENT 'SMARD time series at native resolution. Bundesnetzagentur | SMARD.de (CC BY 4.0)'
+"""
+REVISIONS_DDL = f"""
+CREATE TABLE IF NOT EXISTS {REVISIONS_TABLE} (
+  series_id INTEGER NOT NULL,
+  region VARCHAR NOT NULL,
+  resolution VARCHAR NOT NULL,
+  ts_utc TIMESTAMPTZ NOT NULL,
+  local_date DATE NOT NULL,
+  old_value DOUBLE NOT NULL,
+  new_value DOUBLE NOT NULL,
+  detected_at TIMESTAMPTZ NOT NULL
+)
+"""
+QUARANTINE_DDL = f"""
+CREATE TABLE IF NOT EXISTS {QUARANTINE_TABLE} (
+  file_path VARCHAR NOT NULL,
+  series_id INTEGER,
+  region VARCHAR,
+  resolution VARCHAR,
+  ts_utc TIMESTAMPTZ,
+  value DOUBLE,
+  reason VARCHAR NOT NULL,
+  fetched_at TIMESTAMPTZ NOT NULL,
+  quarantined_at TIMESTAMPTZ NOT NULL
+)
+"""
+
+POINTS = pa.schema(
+    [
+        ("file_path", pa.string()),
+        ("series_id", pa.int32()),
+        ("region", pa.string()),
+        ("resolution", pa.string()),
+        ("ts_ms", pa.int64()),
+        ("value", pa.float64()),
+        ("fetched_at", pa.timestamp("us", tz="UTC")),
+    ]
+)
+UNREADABLE = pa.schema(
+    [
+        ("file_path", pa.string()),
+        ("series_id", pa.int32()),
+        ("region", pa.string()),
+        ("resolution", pa.string()),
+        ("ts_ms", pa.int64()),
+        ("reason", pa.string()),
+        ("fetched_at", pa.timestamp("us", tz="UTC")),
+    ]
+)
+
+# Rows fit for silver have no reason. Volume limits are Germany's, per hour; a quarter-hour
+# slot holds a quarter of an hour's energy. Kept in step with
+# dbt/tests/assert_values_within_physical_limits.sql, which checks silver as a backstop.
+CLASSIFY_SQL = f"""
+CREATE OR REPLACE TEMP TABLE classified AS
+SELECT
+  p.file_path, p.series_id, p.region, p.resolution,
+  epoch_ms(p.ts_ms)::TIMESTAMPTZ AS ts_utc,
+  timezone('Europe/Berlin', epoch_ms(p.ts_ms)::TIMESTAMPTZ)::DATE AS local_date,
+  p.value, p.fetched_at,
+  CASE
+    WHEN p.series_id IS NULL THEN 'unknown_path'
+    WHEN NOT EXISTS (SELECT 1 FROM known_series k WHERE k.series_id = p.series_id)
+      THEN 'unknown_series'
+    WHEN p.resolution NOT IN ('hour', 'quarterhour') THEN 'unknown_resolution'
+    WHEN p.ts_ms % (CASE p.resolution WHEN 'hour' THEN 3600000 ELSE 900000 END) <> 0
+      THEN 'misaligned_slot'
+    WHEN epoch_ms(p.ts_ms)::TIMESTAMPTZ > p.fetched_at + INTERVAL {MAX_LEAD_DAYS} DAYS
+      THEN 'future_slot'
+    WHEN EXISTS (
+      SELECT 1 FROM limits l
+      WHERE l.series_id = p.series_id AND (l.region IS NULL OR l.region = p.region)
+        AND (p.value < l.low * CASE WHEN l.per_slot AND p.resolution = 'quarterhour'
+                                    THEN 0.25 ELSE 1 END
+          OR p.value > l.high * CASE WHEN l.per_slot AND p.resolution = 'quarterhour'
+                                     THEN 0.25 ELSE 1 END)
+    ) THEN 'out_of_range'
+  END AS reason
+FROM points AS p
 """
 
 # A value only changes when a newer landing disagrees, so replaying old chunks is a no-op.
 MERGE_SQL = """
 MERGE INTO {table} AS t
-USING {source} AS s
+USING updates AS s
 ON t.series_id = s.series_id AND t.region = s.region
   AND t.resolution = s.resolution AND t.ts_utc = s.ts_utc
 WHEN MATCHED AND s.value <> t.value AND s.fetched_at > t.last_changed_at THEN UPDATE SET
-  value = s.value, last_changed_at = s.fetched_at, revision_count = t.revision_count + 1
+  value = s.value, last_changed_at = s.fetched_at, revision_count = t.revision_count + 1,
+  merged_at = now()
 WHEN NOT MATCHED THEN INSERT
   (series_id, region, resolution, ts_utc, local_date, value,
-   first_seen_at, last_changed_at, revision_count)
+   first_seen_at, last_changed_at, revision_count, merged_at)
   VALUES (s.series_id, s.region, s.resolution, s.ts_utc, s.local_date, s.value,
-   s.fetched_at, s.fetched_at, 0)
+   s.fetched_at, s.fetched_at, 0, now())
+RETURNING merge_action
 """
 
-
-REVISIONS_DDL = """
-CREATE TABLE IF NOT EXISTS {table} (
-  series_id INT NOT NULL,
-  region STRING NOT NULL,
-  resolution STRING NOT NULL,
-  ts_utc TIMESTAMP NOT NULL COMMENT 'Slot start',
-  local_date DATE NOT NULL COMMENT 'Slot start date in Europe/Berlin',
-  old_value DOUBLE NOT NULL,
-  new_value DOUBLE NOT NULL,
-  detected_at TIMESTAMP NOT NULL COMMENT 'Landing time of the chunk with the new value'
-)
-USING DELTA
-COMMENT 'One row per change SMARD made to a published value'
-"""
-
-# Keyed on the landing that carried the change, so a rerun or a replay of bronze adds nothing.
-REVISIONS_MERGE_SQL = """
-MERGE INTO {table} AS t
-USING {source} AS s
-ON t.series_id = s.series_id AND t.region = s.region
-  AND t.resolution = s.resolution AND t.ts_utc = s.ts_utc AND t.detected_at = s.detected_at
-WHEN NOT MATCHED THEN INSERT *
-"""
-REVISION_COLUMNS = [*KEY, "local_date", "old_value", "new_value", "detected_at"]
-
-QUARANTINE_DDL = """
-CREATE TABLE IF NOT EXISTS {table} (
-  file_path STRING NOT NULL COMMENT 'Bronze chunk the row came from',
-  series_id INT,
-  region STRING,
-  resolution STRING,
-  ts_utc TIMESTAMP COMMENT 'Slot start; null when the chunk could not be read',
-  value DOUBLE,
-  reason STRING NOT NULL COMMENT 'Why the row was kept out of silver',
-  fetched_at TIMESTAMP NOT NULL COMMENT 'Landing time of the chunk',
-  quarantined_at TIMESTAMP NOT NULL COMMENT 'Run that first quarantined the row'
-)
-USING DELTA
-COMMENT 'Rows from bronze kept out of silver, with a reason code'
+# The revisions a batch makes to current silver rows, by the same rule as the MERGE. Keyed on
+# the landing that carried the change, so a rerun or a replay of bronze adds nothing.
+LOG_REVISIONS_SQL = f"""
+INSERT INTO {REVISIONS_TABLE}
+SELECT s.series_id, s.region, s.resolution, s.ts_utc, s.local_date,
+  t.value AS old_value, s.value AS new_value, s.fetched_at AS detected_at
+FROM updates AS s
+JOIN {{table}} AS t USING (series_id, region, resolution, ts_utc)
+WHERE s.value <> t.value AND s.fetched_at > t.last_changed_at
+  AND NOT EXISTS (
+    SELECT 1 FROM {REVISIONS_TABLE} r
+    WHERE r.series_id = s.series_id AND r.region = s.region AND r.resolution = s.resolution
+      AND r.ts_utc = s.ts_utc AND r.detected_at = s.fetched_at
+  )
 """
 
 # A rerun, or the lookback reading the same chunk again, adds nothing.
-QUARANTINE_MERGE_SQL = """
-MERGE INTO {table} AS t
-USING {source} AS s
-ON t.file_path = s.file_path AND t.ts_utc <=> s.ts_utc AND t.reason = s.reason
-WHEN NOT MATCHED THEN INSERT *
+LOG_QUARANTINE_SQL = f"""
+INSERT INTO {QUARANTINE_TABLE}
+SELECT b.file_path, b.series_id, b.region, b.resolution, b.ts_utc, b.value, b.reason,
+  b.fetched_at, now()
+FROM (
+  SELECT file_path, series_id, region, resolution, ts_utc, value, reason, fetched_at
+  FROM classified WHERE reason IS NOT NULL
+  UNION ALL
+  SELECT file_path, series_id, region, resolution,
+    CASE WHEN ts_ms IS NULL THEN NULL ELSE epoch_ms(ts_ms)::TIMESTAMPTZ END,
+    NULL, reason, fetched_at
+  FROM unreadable
+) AS b
+WHERE NOT EXISTS (
+  SELECT 1 FROM {QUARANTINE_TABLE} q
+  WHERE q.file_path = b.file_path AND q.ts_utc IS NOT DISTINCT FROM b.ts_utc
+    AND q.reason = b.reason
+)
 """
-QUARANTINE_COLUMNS = ["file_path", *KEY, "value", "reason", "fetched_at"]
 
-# Values the German power system cannot produce, or the day-ahead market cannot clear, per
-# hour; a quarter-hour slot holds a quarter of an hour's energy. Kept in step with
-# dbt/tests/assert_values_within_physical_limits.sql, which checks silver as a backstop.
-LIMITS = {
-    Series.PRICE_DE_LU: (-500, 4000, False),
-    Series.PRICE_DE_AT_LU: (-500, 4000, False),
-    Series.LOAD: (20000, 100000, True),
-    Series.WIND_ONSHORE: (0, 80000, True),
-    Series.FORECAST_WIND_ONSHORE: (0, 80000, True),
-    Series.WIND_OFFSHORE: (0, 20000, True),
-    Series.FORECAST_WIND_OFFSHORE: (0, 20000, True),
-    Series.SOLAR: (0, 150000, True),
-    Series.FORECAST_SOLAR: (0, 150000, True),
-}
-# Forecasts and prices reach a day or two past the landing; further is a bad timestamp.
-MAX_LEAD_DAYS = 3
+LATEST_SQL = f"""
+CREATE OR REPLACE TEMP TABLE updates AS
+SELECT {", ".join(KEY)}, local_date, value, fetched_at
+FROM classified WHERE reason IS NULL
+QUALIFY row_number() OVER (PARTITION BY {", ".join(KEY)} ORDER BY fetched_at DESC) = 1
+"""
+
+# Landings that set a slot's value: its first, and each that differs from the one before.
+CHANGES_SQL = f"""
+CREATE OR REPLACE TEMP TABLE changes AS
+SELECT * FROM (
+  SELECT {", ".join(KEY)}, local_date, value, fetched_at,
+    lag(value) OVER (PARTITION BY {", ".join(KEY)} ORDER BY fetched_at) AS previous
+  FROM classified WHERE reason IS NULL
+)
+WHERE previous IS NULL OR value <> previous
+"""
+REBUILD_ROWS_SQL = f"""
+INSERT INTO {{table}}
+SELECT {", ".join(KEY)}, min(local_date), arg_max(value, fetched_at), min(fetched_at),
+  max(fetched_at), (count(*) - 1)::INTEGER, now()
+FROM changes GROUP BY ALL
+"""
+REVISION_HISTORY_SQL = f"""
+INSERT INTO {REVISIONS_TABLE}
+SELECT {", ".join(KEY)}, local_date, previous, value, fetched_at
+FROM changes c
+WHERE previous IS NOT NULL
+  AND NOT EXISTS (
+    SELECT 1 FROM {REVISIONS_TABLE} r
+    WHERE r.series_id = c.series_id AND r.region = c.region AND r.resolution = c.resolution
+      AND r.ts_utc = c.ts_utc AND r.detected_at = c.fetched_at
+  )
+"""
 
 
-def read_chunks(
-    spark: SparkSession, root: str = LANDING_ROOT, modified_after: datetime | None = None
-) -> DataFrame:
-    """Chunk files under `root`/smard, landed after `modified_after` if given (UTC)."""
-    reader = (
-        spark.read.schema(CHUNK_SCHEMA)
-        .option("multiLine", "true")
-        .option("recursiveFileLookup", "true")
-        .option("pathGlobFilter", CHUNK_GLOB)
+def connect(path: str = ":memory:", memory_limit: str | None = None) -> duckdb.DuckDBPyConnection:
+    con = duckdb.connect(path)
+    con.execute("SET TimeZone = 'UTC'")
+    if memory_limit:
+        con.execute(f"SET memory_limit = '{memory_limit}'")
+    con.execute("SET preserve_insertion_order = false")
+    con.execute("CREATE SCHEMA IF NOT EXISTS silver")
+    con.execute(SILVER_DDL.format(table=SILVER_TABLE))
+    con.execute(REVISIONS_DDL)
+    con.execute(QUARANTINE_DDL)
+    _reference_tables(con)
+    return con
+
+
+def _reference_tables(con: duckdb.DuckDBPyConnection) -> None:
+    known = pa.table({"series_id": pa.array(sorted(BY_ID), pa.int32())})
+    rows = []
+    for info in BY_ID.values():
+        if info.limits is None:
+            continue
+        low, high = info.limits
+        per_slot = info.kind != Kind.PRICE
+        # Prices have one zone each; volume limits hold for Germany only.
+        for region in [None] if info.kind == Kind.PRICE else ["DE"]:
+            rows.append((info.id, region, low, high, per_slot))
+    limits = pa.table(
+        {
+            "series_id": pa.array([r[0] for r in rows], pa.int32()),
+            "region": pa.array([r[1] for r in rows], pa.string()),
+            "low": pa.array([float(r[2]) for r in rows]),
+            "high": pa.array([float(r[3]) for r in rows]),
+            "per_slot": pa.array([r[4] for r in rows]),
+        }
     )
-    if modified_after is not None:
-        reader = reader.option("modifiedAfter", modified_after.strftime("%Y-%m-%dT%H:%M:%S"))
-    return reader.json(f"{root}/smard").select(
-        F.col("_metadata.file_path").alias("file_path"),
-        F.col("_metadata.file_modification_time").alias("fetched_at"),
-        "series",
-    )
+    con.register("known_series_arrow", known)
+    con.register("limits_arrow", limits)
+    con.execute("CREATE OR REPLACE TEMP TABLE known_series AS SELECT * FROM known_series_arrow")
+    con.execute("CREATE OR REPLACE TEMP TABLE limits AS SELECT * FROM limits_arrow")
 
 
-def parse_chunks(chunks: DataFrame, keep_path: bool = False) -> DataFrame:
-    """One row per filled slot of each chunk.
+def fetched_at(path: str) -> datetime | None:
+    """Landing time from the bronze path: the fetch date and the HHMMSS suffix, UTC."""
+    match = PATH.search(path)
+    if match is None:
+        return None
+    day, clock = match.group(4), match.group(5) or "000000"
+    return datetime.strptime(f"{day}{clock}", "%Y-%m-%d%H%M%S").replace(tzinfo=UTC)
 
-    Expects `file_path`, `fetched_at` and `series` ([epoch_ms, value] pairs). SMARD serves
-    future slots as null, so those are dropped.
+
+def chunk_files(volume: Volume, prefix: str = "smard/", since: date | None = None) -> list[str]:
+    """Chunk files under `prefix`, landed on or after `since` if given. Manifests and indexes
+    start with an underscore and are skipped.
     """
-    path = F.col("file_path")
-    return (
-        chunks.select(
-            F.regexp_extract(path, PATH_PATTERN, 1).try_cast("int").alias("series_id"),
-            F.regexp_extract(path, PATH_PATTERN, 2).alias("region"),
-            F.regexp_extract(path, PATH_PATTERN, 3).alias("resolution"),
-            F.explode("series").alias("point"),
-            "fetched_at",
-            "file_path",
-        )
-        .where(F.size("point") == 2)
-        .select(
-            "series_id",
-            "region",
-            "resolution",
-            F.col("point")[0].cast("long").alias("ts_ms"),
-            F.col("point")[1].alias("value"),
-            "fetched_at",
-            *(["file_path"] if keep_path else []),
-        )
-        .where(F.col("value").isNotNull())
-    )
+    keys = []
+    for key in volume.list(prefix):
+        name = key.rsplit("/", 1)[-1]
+        if not name.endswith(".json") or name.startswith("_"):
+            continue
+        if since is not None:
+            landed = re.search(r"/fetch_date=(\d{4}-\d{2}-\d{2})/", key)
+            if landed and date.fromisoformat(landed.group(1)) < since:
+                continue
+        keys.append(key)
+    return sorted(keys)
 
 
-def unreadable(chunks: DataFrame) -> DataFrame:
-    """Quarantine rows for chunks whose JSON no longer has the expected shape, and for points
-    that are not [epoch_ms, value] pairs.
+def parse(path: str, raw: bytes | None) -> tuple[list[tuple], list[tuple]]:
+    """Filled slots of one chunk, and its unreadable parts. SMARD serves future slots as null,
+    so those are dropped.
     """
-    path = F.col("file_path")
-    keys = [
-        F.regexp_extract(path, PATH_PATTERN, 1).try_cast("int").alias("series_id"),
-        F.regexp_extract(path, PATH_PATTERN, 2).alias("region"),
-        F.regexp_extract(path, PATH_PATTERN, 3).alias("resolution"),
-    ]
-    payload = chunks.where(F.col("series").isNull()).select(
-        "file_path",
-        *keys,
-        F.lit(None).cast("timestamp").alias("ts_utc"),
-        F.lit(None).cast("double").alias("value"),
-        F.lit("bad_payload").alias("reason"),
-        "fetched_at",
+    match = PATH.search(path)
+    landed = fetched_at(path) or datetime.now(UTC)
+    if match is None:
+        return [], [(path, None, None, None, None, "unknown_path", landed)]
+    series, region, resolution = int(match.group(1)), match.group(2), match.group(3)
+    try:
+        document = json.loads(raw) if raw is not None else None
+    except ValueError:
+        document = None
+    points = document.get("series") if isinstance(document, dict) else None
+    if not isinstance(points, list):
+        return [], [(path, series, region, resolution, None, "bad_payload", landed)]
+    good, bad = [], []
+    for point in points:
+        if not isinstance(point, list) or len(point) != 2:
+            first = point[0] if isinstance(point, list) and point else None
+            ts = first if isinstance(first, int) else None
+            bad.append((path, series, region, resolution, ts, "bad_point", landed))
+            continue
+        ts, value = point
+        if value is None:
+            continue
+        if not isinstance(ts, int) or not isinstance(value, int | float):
+            bad.append((path, series, region, resolution, None, "bad_point", landed))
+            continue
+        good.append((path, series, region, resolution, ts, float(value), landed))
+    return good, bad
+
+
+def _table(rows: list[tuple], schema: pa.Schema) -> pa.Table:
+    columns = list(zip(*rows, strict=True)) if rows else [[] for _ in schema]
+    return pa.Table.from_arrays(
+        [pa.array(col, field.type) for col, field in zip(columns, schema, strict=True)],
+        schema=schema,
     )
-    points = (
-        chunks.select("file_path", *keys, F.explode("series").alias("point"), "fetched_at")
-        .where(F.size("point") != 2)
-        .select(
-            "file_path",
-            "series_id",
-            "region",
-            "resolution",
-            F.timestamp_millis(F.col("point")[0].cast("long")).alias("ts_utc"),
-            F.lit(None).cast("double").alias("value"),
-            F.lit("bad_point").alias("reason"),
-            "fetched_at",
-        )
-    )
-    return payload.unionByName(points)
 
 
-def with_reason(rows: DataFrame) -> DataFrame:
-    """Add `reason`: null for a row fit for silver, else why it is quarantined.
+def read_batch(volume: Volume, keys: list[str], workers: int = 16) -> tuple[pa.Table, pa.Table]:
+    """Points and unreadable rows of these chunk files, read in parallel."""
+    with ThreadPoolExecutor(workers) as pool:
+        bodies = list(pool.map(volume.read, keys))
+    good, bad = [], []
+    for key, raw in zip(keys, bodies, strict=True):
+        g, b = parse(key, raw)
+        good += g
+        bad += b
+    return _table(good, POINTS), _table(bad, UNREADABLE)
 
-    Expects the columns `with_time_columns` returns.
+
+def _stage(con: duckdb.DuckDBPyConnection, points: pa.Table, unreadable: pa.Table) -> None:
+    con.register("points_arrow", points)
+    con.register("unreadable_arrow", unreadable)
+    con.execute("CREATE OR REPLACE TEMP TABLE points AS SELECT * FROM points_arrow")
+    con.execute("CREATE OR REPLACE TEMP TABLE unreadable AS SELECT * FROM unreadable_arrow")
+    con.unregister("points_arrow")
+    con.unregister("unreadable_arrow")
+    con.execute(CLASSIFY_SQL)
+
+
+def merge_batch(
+    con: duckdb.DuckDBPyConnection, points: pa.Table, unreadable: pa.Table, table: str
+) -> dict:
+    """Quarantine, log revisions, then upsert one batch. Revisions are logged before the MERGE
+    overwrites the old values; a rerun after a failed MERGE finds the same ones and adds nothing.
     """
-    series, resolution, ts, value = (
-        F.col("series_id"),
-        F.col("resolution"),
-        F.col("ts_utc"),
-        F.col("value"),
-    )
-    step = F.when(resolution == Resolution.HOUR.value, 60).otherwise(15)
-    misaligned = (F.minute(ts) % step != 0) | (F.second(ts) != 0)
-    out_of_range = F.lit(False)
-    for s, (low, high, per_slot) in LIMITS.items():
-        scale = F.when(resolution == Resolution.QUARTERHOUR.value, 0.25 if per_slot else 1.0)
-        scale = scale.otherwise(1.0)
-        out_of_range = out_of_range | (
-            (series == s.value) & ((value < low * scale) | (value > high * scale))
-        )
-    lead = F.expr(f"INTERVAL {MAX_LEAD_DAYS} DAYS")
-    reason = (
-        F.when(series.isNull(), "unknown_path")
-        .when(~series.isin([s.value for s in Series]), "unknown_series")
-        .when(~resolution.isin([r.value for r in Resolution]), "unknown_resolution")
-        .when(misaligned, "misaligned_slot")
-        .when(ts > F.col("fetched_at") + lead, "future_slot")
-        .when(out_of_range, "out_of_range")
-    )
-    return rows.withColumn("reason", reason)
+    _stage(con, points, unreadable)
+    quarantined = con.execute(LOG_QUARANTINE_SQL).fetchone()[0]
+    con.execute(LATEST_SQL)
+    revisions = con.execute(LOG_REVISIONS_SQL.format(table=table)).fetchone()[0]
+    actions = [row[0] for row in con.execute(MERGE_SQL.format(table=table)).fetchall()]
+    return {
+        "inserted": actions.count("INSERT"),
+        "updated": actions.count("UPDATE"),
+        "revisions_logged": revisions,
+        "quarantined": quarantined,
+    }
 
 
-def split(chunks: DataFrame) -> tuple[DataFrame, DataFrame]:
-    """Rows fit for silver, and the quarantined rows with their reason."""
-    rows = with_reason(with_time_columns(parse_chunks(chunks, keep_path=True)))
-    good = rows.where(F.col("reason").isNull()).drop("reason", "file_path")
-    bad = rows.where(F.col("reason").isNotNull()).select(*QUARANTINE_COLUMNS)
-    return good, bad.unionByName(unreadable(chunks))
-
-
-def with_time_columns(rows: DataFrame) -> DataFrame:
-    """Replace `ts_ms` (slot start, epoch ms) with `ts_utc` and the slot's `local_date`.
-
-    The session time zone must be UTC: `to_date` reads the shifted timestamp in it.
-    """
-    ts_utc = F.timestamp_millis("ts_ms")
-    return rows.withColumns(
-        {"ts_utc": ts_utc, "local_date": F.to_date(F.from_utc_timestamp(ts_utc, LOCAL_TZ))}
-    ).drop("ts_ms")
-
-
-def latest_per_slot(rows: DataFrame) -> DataFrame:
-    """Keep the newest landing of each slot; a batch can hold several fetches of one chunk."""
-    newest_first = Window.partitionBy(*KEY).orderBy(F.col("fetched_at").desc())
-    return (
-        rows.withColumn("_rank", F.row_number().over(newest_first))
-        .where(F.col("_rank") == 1)
-        .drop("_rank")
-    )
-
-
-def _changes(rows: DataFrame) -> DataFrame:
-    """Landings that set a slot's value: its first, and each that differs from the one before.
-    `_previous` holds the value it replaced.
-    """
-    by_landing = Window.partitionBy(*KEY).orderBy("fetched_at")
-    return rows.withColumn("_previous", F.lag("value").over(by_landing)).where(
-        F.col("_previous").isNull() | (F.col("value") != F.col("_previous"))
-    )
-
-
-def rebuild_rows(rows: DataFrame) -> DataFrame:
-    """Silver rows from every landing of each slot, as successive MERGEs would leave them."""
-    return (
-        _changes(rows)
-        .groupBy(*KEY)
-        .agg(
-            F.min("local_date").alias("local_date"),
-            F.max_by("value", "fetched_at").alias("value"),
-            F.min("fetched_at").alias("first_seen_at"),
-            F.max("fetched_at").alias("last_changed_at"),
-            (F.count("*") - 1).cast("int").alias("revision_count"),
-        )
-    )
-
-
-def revision_history(rows: DataFrame) -> DataFrame:
-    """Every revision in a set of landings, e.g. all of bronze."""
-    return (
-        _changes(rows)
-        .where(F.col("_previous").isNotNull())
-        .withColumnsRenamed(
-            {"_previous": "old_value", "value": "new_value", "fetched_at": "detected_at"}
-        )
-        .select(*REVISION_COLUMNS)
-    )
-
-
-def revised(updates: DataFrame, current: DataFrame) -> DataFrame:
-    """The revisions a batch makes to the current silver rows, by the same rule as MERGE."""
-    s, t = updates.alias("s"), current.alias("t")
-    return (
-        s.join(t, KEY)
-        .where(
-            (F.col("s.value") != F.col("t.value"))
-            & (F.col("s.fetched_at") > F.col("t.last_changed_at"))
-        )
-        .select(
-            *KEY,
-            F.col("s.local_date"),
-            F.col("t.value").alias("old_value"),
-            F.col("s.value").alias("new_value"),
-            F.col("s.fetched_at").alias("detected_at"),
-        )
-    )
-
-
-def log_revisions(revisions: DataFrame, table: str = REVISIONS_TABLE) -> int:
-    """Append new revisions to the log, creating it on first use. Returns rows added."""
-    spark = revisions.sparkSession
-    spark.sql(REVISIONS_DDL.format(table=table))
-    revisions.createOrReplaceTempView("smard_revisions")
-    merged = spark.sql(REVISIONS_MERGE_SQL.format(table=table, source="smard_revisions"))
-    return merged.first()["num_inserted_rows"]
-
-
-def log_quarantine(rows: DataFrame, table: str = QUARANTINE_TABLE) -> int:
-    """Add newly quarantined rows to the table, creating it on first use. Returns rows added."""
-    spark = rows.sparkSession
-    spark.sql(QUARANTINE_DDL.format(table=table))
-    rows.withColumn("quarantined_at", F.current_timestamp()).createOrReplaceTempView(
-        "smard_quarantine"
-    )
-    merged = spark.sql(QUARANTINE_MERGE_SQL.format(table=table, source="smard_quarantine"))
-    return merged.first()["num_inserted_rows"]
-
-
-def rebuild(spark: SparkSession, root: str = LANDING_ROOT, table: str = REBUILD_TABLE) -> None:
-    """Replace `table` with silver replayed from every chunk in bronze."""
-    spark.conf.set("spark.sql.session.timeZone", "UTC")
-    good, _ = split(read_chunks(spark, root))
-    rows = rebuild_rows(good)
-    spark.sql(f"DROP TABLE IF EXISTS {table}")
-    spark.sql(SILVER_DDL.format(table=table))
-    rows.select(*spark.table(table).columns).writeTo(table).append()
-
-
-def differences(spark: SparkSession, left: str, right: str) -> dict:
-    """Slots whose value differs between two silver tables, and rows whose lineage differs."""
-
-    def mismatched(columns: str) -> int:
-        a = f"SELECT {columns} FROM {left}"
-        b = f"SELECT {columns} FROM {right}"
-        return spark.sql(f"({a} EXCEPT ALL {b}) UNION ALL ({b} EXCEPT ALL {a})").count()
-
-    return {"values": mismatched(", ".join([*KEY, "value"])), "rows": mismatched("*")}
-
-
-def merge_into_silver(updates: DataFrame, table: str = SILVER_TABLE) -> dict:
-    """Upsert into the Delta table, creating it on first use. Returns the MERGE metrics."""
-    spark = updates.sparkSession
-    spark.sql(SILVER_DDL.format(table=table))
-    updates.createOrReplaceTempView("smard_updates")
-    return spark.sql(MERGE_SQL.format(table=table, source="smard_updates")).first().asDict()
+def _sum(metrics: Iterable[dict]) -> dict:
+    total: dict[str, int] = {}
+    for m in metrics:
+        for k, v in m.items():
+            total[k] = total.get(k, 0) + v
+    return total
 
 
 def run(
-    spark: SparkSession,
-    root: str = LANDING_ROOT,
-    table: str = SILVER_TABLE,
+    con: duckdb.DuckDBPyConnection,
+    volume: Volume,
     lookback: timedelta | None = timedelta(days=3),
-    revisions_table: str = REVISIONS_TABLE,
-    quarantine_table: str = QUARANTINE_TABLE,
+    table: str = SILVER_TABLE,
+    now: datetime | None = None,
 ) -> dict:
-    """Merge chunks landed within `lookback` (all of bronze if None) into silver, logging
-    each value it changes and quarantining rows unfit for silver.
+    """Merge chunks landed within `lookback` (all of bronze if None) into silver, logging each
+    value it changes and quarantining rows unfit for silver.
     """
-    spark.conf.set("spark.sql.session.timeZone", "UTC")
-    since = datetime.now(UTC) - lookback if lookback is not None else None
-    good, bad = split(read_chunks(spark, root, since))
-    quarantined = log_quarantine(bad, quarantine_table)
-    updates = latest_per_slot(good)
-    # Logged before the MERGE overwrites the old values; a rerun after a failed MERGE
-    # finds the same revisions and adds nothing.
-    spark.sql(SILVER_DDL.format(table=table))
-    logged = log_revisions(revised(updates, spark.table(table)), revisions_table)
-    return {
-        **merge_into_silver(updates, table),
-        "revisions_logged": logged,
-        "quarantined": quarantined,
-    }
+    con.execute(SILVER_DDL.format(table=table))
+    since = ((now or datetime.now(UTC)) - lookback).date() if lookback is not None else None
+    keys = chunk_files(volume, since=since)
+    # A batch holds whole series, so the newest landing of a slot is always in it.
+    metrics = [
+        merge_batch(con, *read_batch(volume, batch), table) for batch in _group_batches(keys)
+    ]
+    return {"files": len(keys), **_sum(metrics)}
+
+
+def _group_batches(keys: list[str]) -> Iterator[list[str]]:
+    """Batches that never split one series, region and resolution."""
+    batch: list[str] = []
+    for _, group in groupby(keys, key=lambda k: k.split("/fetch_date=")[0]):
+        files = list(group)
+        if batch and len(batch) + len(files) > BATCH_FILES:
+            yield batch
+            batch = []
+        batch += files
+    if batch:
+        yield batch
+
+
+def rebuild(
+    con: duckdb.DuckDBPyConnection,
+    volume: Volume,
+    table: str = REBUILD_TABLE,
+    with_revisions: bool = False,
+) -> dict:
+    """Replace `table` with silver replayed from every chunk in bronze, as successive MERGEs
+    would leave it; with `with_revisions`, also log every revision bronze holds. Works one
+    series, region and resolution at a time, so memory follows the largest of them.
+    """
+    con.execute(f"DROP TABLE IF EXISTS {table}")
+    con.execute(SILVER_DDL.format(table=table))
+    keys = chunk_files(volume)
+    revisions = 0
+    for batch in _group_batches(keys):
+        _stage(con, *read_batch(volume, batch))
+        con.execute(LOG_QUARANTINE_SQL)
+        con.execute(CHANGES_SQL)
+        con.execute(REBUILD_ROWS_SQL.format(table=table))
+        if with_revisions:
+            revisions += con.execute(REVISION_HISTORY_SQL).fetchone()[0]
+    rows = con.execute(f"SELECT count(*) FROM {table}").fetchone()[0]
+    return {"files": len(keys), "rows": rows, "revisions_logged": revisions}
+
+
+def differences(con: duckdb.DuckDBPyConnection, left: str, right: str) -> dict:
+    """Slots whose value differs between two silver tables, and rows whose lineage differs."""
+
+    def mismatched(columns: str) -> int:
+        a, b = f"SELECT {columns} FROM {left}", f"SELECT {columns} FROM {right}"
+        sql = f"SELECT count(*) FROM (({a} EXCEPT ALL {b}) UNION ALL ({b} EXCEPT ALL {a}))"
+        return con.execute(sql).fetchone()[0]
+
+    return {"values": mismatched(", ".join([*KEY, "value"])), "rows": mismatched(LINEAGE)}
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -412,31 +454,30 @@ def main(argv: list[str] | None = None) -> None:
     window.add_argument(
         "--rebuild", action="store_true", help="replace --table with a replay of all of bronze"
     )
-    window.add_argument(
-        "--revisions-from-bronze",
-        action="store_true",
-        help="log every revision found in all of bronze; safe to repeat",
-    )
-    parser.add_argument("--root", default=LANDING_ROOT)
-    parser.add_argument("--table", default=SILVER_TABLE)
-    parser.add_argument("--revisions-table", default=REVISIONS_TABLE)
+    parser.add_argument("--with-revisions", action="store_true", help="with --rebuild")
+    parser.add_argument("--warehouse", default=os.environ.get("WAREHOUSE", "warehouse.duckdb"))
+    parser.add_argument("--bronze", default=os.environ.get("BRONZE"))
+    parser.add_argument("--table", default=None)
     parser.add_argument("--compare-with", help="after --rebuild, fail if values differ from this")
+    parser.add_argument("--memory-limit", default=os.environ.get("DUCKDB_MEMORY_LIMIT"))
     args = parser.parse_args(argv)
+    if not args.bronze:
+        parser.error("set --bronze or BRONZE")
 
-    spark = SparkSession.builder.getOrCreate()
-    if args.revisions_from_bronze:
-        spark.conf.set("spark.sql.session.timeZone", "UTC")
-        good, _ = split(read_chunks(spark, args.root))
-        print(f"revisions_logged={log_revisions(revision_history(good), args.revisions_table)}")
-        return
-    if args.rebuild:
-        rebuild(spark, args.root, args.table)
-        if args.compare_with:
-            diffs = differences(spark, args.table, args.compare_with)
-            print(f"differing values={diffs['values']} rows={diffs['rows']}")
-            if diffs["values"]:
-                raise SystemExit(f"{args.table} and {args.compare_with} hold different values")
-        return
-    lookback = None if args.all else timedelta(days=args.lookback_days)
-    metrics = run(spark, args.root, args.table, lookback, args.revisions_table)
-    print(" ".join(f"{k}={v}" for k, v in metrics.items()))
+    volume = open_volume(args.bronze)
+    con = connect(args.warehouse, args.memory_limit)
+    try:
+        if args.rebuild:
+            table = args.table or REBUILD_TABLE
+            print(rebuild(con, volume, table, args.with_revisions))
+            if args.compare_with:
+                diffs = differences(con, table, args.compare_with)
+                print(f"differing values={diffs['values']} rows={diffs['rows']}")
+                if diffs["values"]:
+                    raise SystemExit(f"{table} and {args.compare_with} hold different values")
+            return
+        lookback = None if args.all else timedelta(days=args.lookback_days)
+        metrics = run(con, volume, lookback, args.table or SILVER_TABLE)
+        print(" ".join(f"{k}={v}" for k, v in metrics.items()))
+    finally:
+        con.close()
