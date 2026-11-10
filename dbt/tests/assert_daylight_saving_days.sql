@@ -1,18 +1,17 @@
--- Spring-forward days have 23 hours and fall-back days 25, in hourly and quarter-hour prices.
+-- Spring-forward days have 23 hours and fall-back days 25, in hourly and 15-minute DE-LU prices.
 with days as (
     select local_date, price_hours as slots, 1 as per_hour
-    from {{ ref("daily_price_summary") }}
+    from {{ ref("prices_daily") }}
+    where zone = 'DE-LU'
     union all
-    select local_date, count(price_eur_mwh), 4
-    from {{ ref("quarterhour_features") }}
+    select local_date, count(*), 4
+    from {{ ref("prices_quarterhour") }}
+    where zone = 'DE-LU' and source_resolution = 'quarterhour'
     group by local_date
 ),
 
 expected as (
-    select
-        *,
-        (unix_timestamp(to_utc_timestamp(date_add(local_date, 1), 'Europe/Berlin'))
-            - unix_timestamp(to_utc_timestamp(local_date, 'Europe/Berlin'))) / 3600 as hours
+    select *, {{ hours_in_day("local_date") }} as hours
     from days
 )
 

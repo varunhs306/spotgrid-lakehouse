@@ -1,8 +1,12 @@
 name: spotgrid
-version: "1.0.0"
+version: "2.0.0"
 profile: spotgrid
 
 model-paths: ["models"]
+macro-paths: ["macros"]
+
+# The series catalog (grid, prices, regions) comes from spotgrid_lakehouse.sources.catalog;
+# run dbt through `python -m spotgrid_lakehouse.gold`, which passes it as vars.
 
 models:
   spotgrid:
