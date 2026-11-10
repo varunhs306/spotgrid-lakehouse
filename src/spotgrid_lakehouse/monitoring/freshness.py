@@ -1,4 +1,4 @@
-"""Compare observed SMARD versions with published inputs using only the Files API.
+"""Compare observed SMARD versions with published inputs using only bronze's files.
 
 The existing daily workflow is the single writer. Snapshots are private provenance,
 separate from both bronze's raw-byte index and the public export manifest contract.
@@ -9,11 +9,12 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
-from spotgrid_lakehouse.landing.volume import DatabricksVolume, Volume
+from spotgrid_lakehouse.landing.volume import Volume, open_volume
 from spotgrid_lakehouse.monitoring.checks import BERLIN, horizon, hours_in_day
 from spotgrid_lakehouse.sources.smard import SLOT_MS, Resolution, Series, default_region
 
@@ -346,10 +347,15 @@ def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description="Acknowledge inputs after a successful export.")
     parser.add_argument("--landing", required=True, type=Path)
     parser.add_argument("--manifest", required=True, type=Path)
+    parser.add_argument(
+        "--bronze", default=os.environ.get("BRONZE"), help="s3://bucket/prefix or a directory"
+    )
     args = parser.parse_args(argv)
+    if not args.bronze:
+        parser.error("set --bronze or BRONZE")
     document = json.loads(args.landing.read_text())
     document["source_snapshot"] = acknowledge(
-        DatabricksVolume(),
+        open_volume(args.bronze),
         document["source_snapshot"],
         json.loads(args.manifest.read_text()),
     )
