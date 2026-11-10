@@ -1,19 +1,21 @@
-"""Land weekly SMARD chunks in the bronze volume exactly as served."""
+"""Land weekly SMARD chunks in bronze exactly as served."""
 
 from __future__ import annotations
 
 import argparse
 import hashlib
 import json
+import os
 from collections.abc import Callable, Iterable
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from databricks.sdk import WorkspaceClient
+import httpx
 
-from spotgrid_lakehouse.landing.volume import LANDING_ROOT, DatabricksVolume, Volume
+from spotgrid_lakehouse.landing.volume import Volume, open_volume
 from spotgrid_lakehouse.monitoring.freshness import SourceTracker
+from spotgrid_lakehouse.sources.catalog import Kind, sources
 from spotgrid_lakehouse.sources.smard import (
     Resolution,
     Series,
@@ -31,13 +33,13 @@ INDEX_VERSION = 1
 BERLIN = ZoneInfo("Europe/Berlin")
 
 
-def series_dir(series: Series, resolution: Resolution, region: str | None = None) -> str:
+def series_dir(series: int, resolution: Resolution, region: str | None = None) -> str:
     region = region or default_region(series)
-    return f"{SOURCE}/{series.value}/{region}/{resolution}"
+    return f"{SOURCE}/{int(series)}/{region}/{resolution}"
 
 
 def landing_dir(
-    series: Series, resolution: Resolution, fetch_date: date, region: str | None = None
+    series: int, resolution: Resolution, fetch_date: date, region: str | None = None
 ) -> str:
     return f"{series_dir(series, resolution, region)}/fetch_date={fetch_date.isoformat()}"
 
@@ -45,7 +47,7 @@ def landing_dir(
 def land(
     client: SmardClient,
     volume: Volume,
-    series: Series,
+    series: int,
     resolution: Resolution,
     starts: Iterable[int],
     region: str | None = None,
@@ -65,7 +67,7 @@ def land(
     manifest = _read_json(volume, f"{folder}/{MANIFEST}") or {
         "version": MANIFEST_VERSION,
         "source": SOURCE,
-        "series": series.value,
+        "series": int(series),
         "region": region,
         "resolution": str(resolution),
         "fetch_date": fetch_date.isoformat(),
@@ -141,12 +143,124 @@ def chunk_dates(starts: list[int]) -> tuple[str, str] | None:
     return first.isoformat(), (last + timedelta(days=6)).isoformat()
 
 
+def monitored(series: int, region: str) -> Series | None:
+    """The watched series this source is, if any: German series in their default region."""
+    try:
+        watched = Series(series)
+    except ValueError:
+        return None
+    return watched if region == default_region(watched) else None
+
+
+def selection(
+    scope: str,
+    resolutions: Iterable[Resolution],
+    series_ids: Iterable[int] | None = None,
+    include_ended: bool = False,
+) -> list[tuple[int, str, Resolution]]:
+    """(series id, region, resolution) to land: every source, or only prices. Series that
+    have ended (DE-AT-LU, nuclear) publish nothing new, so only a backfill includes them.
+    """
+    kinds = {Kind.PRICE} if scope == "prices" else None
+    wanted = set(series_ids) if series_ids else None
+    return [
+        (info.id, region, resolution)
+        for info, region in sources(kinds)
+        if (wanted is None or info.id in wanted) and (include_ended or info.ended is None)
+        for resolution in resolutions
+    ]
+
+
+def run(
+    volume: Volume,
+    client: SmardClient,
+    selected: list[tuple[int, str, Resolution]],
+    weeks: int = 2,
+    since: date | None = None,
+    until: date | None = None,
+    now: datetime | None = None,
+) -> dict:
+    """Land every selected source. A source SMARD does not publish (404) is marked
+    unavailable; any other failure is raised after every source has been tried.
+    """
+    now = now or datetime.now(UTC)
+    watched = [
+        (m, resolution)
+        for series, region, resolution in selected
+        if (m := monitored(series, region)) is not None
+    ]
+    tracker = SourceTracker(volume, watched, now)
+    landed, failures = [], []
+    try:
+        for series, region, resolution in selected:
+            watch = monitored(series, region)
+            entry = {
+                "series": watch.name if watch else f"{series}/{region}",
+                "series_id": series,
+                "region": region,
+                "resolution": str(resolution),
+                "monitored": watch is not None,
+                "checked": 0,
+                "written": 0,
+                "dates": None,
+            }
+            try:
+                starts = select_chunks(
+                    client.index(series, resolution, region), weeks, since, until
+                )
+                if since is None:
+                    # A source SMARD stopped updating has no chunk this recent; skip it.
+                    oldest = (now - timedelta(weeks=weeks + 1)).timestamp() * 1000
+                    starts = [s for s in starts if s >= oldest]
+
+                def observe(
+                    start: int, raw: bytes, watch=watch, resolution: Resolution = resolution
+                ) -> None:
+                    if watch is not None:
+                        tracker.observe(watch, resolution, start, raw)
+
+                written = land(client, volume, series, resolution, starts, region, observe=observe)
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code != 404:
+                    failures.append(f"{entry['series']} {resolution}: {exc}")
+                    entry["error"] = type(exc).__name__
+                else:
+                    entry["unavailable"] = True
+                if watch is not None:
+                    tracker.finish_source(watch, resolution, type(exc).__name__)
+                landed.append(entry)
+                continue
+            except Exception as exc:
+                failures.append(f"{entry['series']} {resolution}: {type(exc).__name__}: {exc}")
+                entry["error"] = type(exc).__name__
+                if watch is not None:
+                    tracker.finish_source(watch, resolution, type(exc).__name__)
+                landed.append(entry)
+                continue
+            if watch is not None:
+                tracker.finish_source(watch, resolution)
+            entry.update(checked=len(starts), written=len(written), dates=chunk_dates(starts))
+            landed.append(entry)
+    finally:
+        # Even an upstream outage must leave an explicit unknown status for the report.
+        snapshot = tracker.snapshot()
+    report = {"landed": landed, "source_snapshot": snapshot}
+    if failures:
+        raise LandingFailed(report, failures)
+    return report
+
+
+class LandingFailed(RuntimeError):
+    def __init__(self, report: dict, failures: list[str]) -> None:
+        super().__init__(f"{len(failures)} sources failed: " + "; ".join(failures[:5]))
+        self.report = report
+
+
 def main(argv: list[str] | None = None) -> None:
-    parser = argparse.ArgumentParser(description="Land SMARD chunks in the bronze volume.")
-    parser.add_argument(
-        "--series", nargs="+", default=list(Series.__members__), choices=Series.__members__
-    )
-    parser.add_argument("--resolution", nargs="+", default=[Resolution.HOUR], type=Resolution)
+    parser = argparse.ArgumentParser(description="Land SMARD chunks in bronze.")
+    parser.add_argument("--scope", choices=["all", "prices"], default="all")
+    parser.add_argument("--series", nargs="+", type=int, help="only these SMARD series ids")
+    parser.add_argument("--resolution", nargs="+", default=list(Resolution), type=Resolution)
     window = parser.add_mutually_exclusive_group()
     window.add_argument(
         "--weeks", default=2, type=int, help="latest N weekly chunks, current one included"
@@ -155,57 +269,33 @@ def main(argv: list[str] | None = None) -> None:
         "--since", type=date.fromisoformat, help="backfill: every chunk from this local day"
     )
     parser.add_argument("--until", type=date.fromisoformat, help="backfill: last local day")
-    parser.add_argument("--root", default=LANDING_ROOT)
-    parser.add_argument("--profile", help="Databricks config profile; default auth chain if unset")
+    parser.add_argument(
+        "--bronze", default=os.environ.get("BRONZE"), help="s3://bucket/prefix or a directory"
+    )
     parser.add_argument("--report", type=Path, help="write what was landed to this JSON file")
     args = parser.parse_args(argv)
+    if not args.bronze:
+        parser.error("set --bronze or BRONZE")
 
-    volume = DatabricksVolume(args.root, WorkspaceClient(profile=args.profile))
-    landed = []
-    selections = [
-        (Series[name], resolution) for name in args.series for resolution in args.resolution
-    ]
-    tracker = SourceTracker(volume, selections, datetime.now(UTC))
-    try:
-        with SmardClient() as client:
-            for series, resolution in selections:
-                try:
-                    starts = select_chunks(
-                        client.index(series, resolution), args.weeks, args.since, args.until
-                    )
-
-                    def observe(
-                        start: int,
-                        raw: bytes,
-                        series: Series = series,
-                        resolution: Resolution = resolution,
-                    ) -> None:
-                        tracker.observe(series, resolution, start, raw)
-
-                    written = land(client, volume, series, resolution, starts, observe=observe)
-                except Exception as exc:
-                    tracker.finish_source(series, resolution, type(exc).__name__)
-                    raise
-                tracker.finish_source(series, resolution)
-                skipped = len(starts) - len(written)
-                print(f"{series.name} {resolution}: wrote {len(written)}, skipped {skipped}")
-                landed.append(
-                    {
-                        "series": series.name,
-                        "series_id": series.value,
-                        "resolution": str(resolution),
-                        "checked": len(starts),
-                        "written": len(written),
-                        "dates": chunk_dates(starts),
-                    }
-                )
-    finally:
-        # Even an upstream outage must leave an explicit unknown status for the report.
-        snapshot = tracker.snapshot()
-        if args.report:
-            args.report.write_text(
-                json.dumps({"landed": landed, "source_snapshot": snapshot}, indent=2)
+    selected = selection(
+        args.scope, args.resolution, args.series, include_ended=args.since is not None
+    )
+    report = None
+    with SmardClient() as client:
+        try:
+            report = run(
+                open_volume(args.bronze), client, selected, args.weeks, args.since, args.until
             )
+        except LandingFailed as exc:
+            report = exc.report
+            raise
+        finally:
+            if args.report and report is not None:
+                args.report.write_text(json.dumps(report, indent=2))
+    for entry in report["landed"]:
+        if entry["written"]:
+            print(f"{entry['series']} {entry['resolution']}: wrote {entry['written']}")
+    print(f"{len(report['landed'])} sources checked")
 
 
 if __name__ == "__main__":

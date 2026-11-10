@@ -83,3 +83,35 @@ def test_select_weeks_overlapping_a_date_range():
         WEEK_2026_10_05,
     ]
     assert select_chunks(starts, since=date(2026, 10, 5)) == [WEEK_2026_10_05, WEEK_2026_10_12]
+
+
+def test_ended_series_are_left_out_except_for_a_backfill():
+    from spotgrid_lakehouse.landing.smard import selection
+
+    daily = {(s, r) for s, r, _ in selection("all", [Resolution.HOUR])}
+    backfill = {(s, r) for s, r, _ in selection("all", [Resolution.HOUR], include_ended=True)}
+
+    ended = {(251, "DE-AT-LU"), (1224, "DE"), (1224, "Amprion"), (1224, "TenneT"),
+             (1224, "TransnetBW")}  # fmt: skip
+    assert backfill - daily == ended
+
+
+def test_a_source_smard_stopped_updating_is_not_fetched(volume):
+    import httpx
+
+    from spotgrid_lakehouse.landing.smard import run
+    from spotgrid_lakehouse.sources.smard import SmardClient
+
+    requests = []
+
+    def stale(request):
+        requests.append(request.url.path)
+        return httpx.Response(200, json={"timestamps": [WEEK_2026_09_28]})
+
+    client = SmardClient(httpx.Client(transport=httpx.MockTransport(stale)), min_interval_s=0)
+    report = run(
+        volume, client, [(410, "AT", Resolution.HOUR)], now=datetime(2026, 11, 11, tzinfo=UTC)
+    )
+
+    assert report["landed"][0]["checked"] == 0
+    assert len(requests) == 1  # the index only
