@@ -58,38 +58,136 @@ DEFAULT_SPAN = {
     Resolution.MONTH: timedelta(days=366),
 }
 BULK_TABLES = {
-    ("grid", Resolution.QUARTERHOUR), ("grid", Resolution.HOUR),
-    ("prices", Resolution.QUARTERHOUR), ("prices", Resolution.HOUR),
-}  # fmt: skip
+    ("grid", Resolution.QUARTERHOUR),
+    ("grid", Resolution.HOUR),
+    ("prices", Resolution.QUARTERHOUR),
+    ("prices", Resolution.HOUR),
+}
 
 
 def gold(request: Request) -> GoldData:
     return request.app.state.gold
 
 
+REGION_NAMES = {
+    "DE": "Germany",
+    "50Hertz": "German control area 50Hertz",
+    "Amprion": "German control area Amprion",
+    "TenneT": "German control area TenneT",
+    "TransnetBW": "German control area TransnetBW",
+    "AT": "Austria",
+    "APG": "Austrian control area APG",
+    "LU": "Luxembourg",
+    "Creos": "Luxembourg control area Creos",
+}
+ZONE_NAMES = {SERVED_ZONE.get(s.id, s.zone): s.label for s in SERIES if s.kind == Kind.PRICE}
+ZONE_NAMES["DE-LU"] = "Germany/Luxembourg (DE-AT-LU until 2018-09-30)"
+
+
+def _bullets(names: dict[str, str]) -> str:
+    return "\n".join(f"- `{code}`: {name}" for code, name in names.items())
+
+
 Gold = Annotated[GoldData, Depends(gold)]
-Start = Annotated[date | None, Query(description="First local date (Europe/Berlin), inclusive")]
-End = Annotated[date | None, Query(description="Last local date (Europe/Berlin), inclusive")]
-Res = Annotated[Resolution, Query(description="15min, hour, day or month")]
-Fields = Annotated[
-    str | None, Query(description="Comma-separated columns to return; keys are always included")
+Start = Annotated[
+    date | None,
+    Query(
+        description="First local date in Europe/Berlin, `YYYY-MM-DD`, inclusive. Without start "
+        "and end, the newest stretch with data is returned.",
+        examples=["2026-06-08"],
+    ),
 ]
-Fmt = Annotated[Format, Query(description="json or csv")]
+End = Annotated[
+    date | None,
+    Query(
+        description="Last local date in Europe/Berlin, `YYYY-MM-DD`, inclusive.",
+        examples=["2026-06-14"],
+    ),
+]
+Res = Annotated[
+    Resolution,
+    Query(
+        description="`15min` and `hour` are slots; `day` and `month` are German local days "
+        "and months, energy summed and prices as base/peak/off-peak."
+    ),
+]
+Fields = Annotated[
+    str | None,
+    Query(
+        description="Comma-separated columns to return, e.g. `load_mwh,solar_mwh`. The area "
+        "and time columns are always included. All columns are listed in `/v2/catalog`.",
+        examples=["load_mwh,solar_mwh,wind_onshore_mwh"],
+    ),
+]
+Fmt = Annotated[
+    Format,
+    Query(description="`json` (default) or `csv`. CSV has a header row; empty cells are null."),
+]
+Regions = Annotated[
+    str,
+    Query(
+        description="One or more grid regions, comma-separated:\n\n" + _bullets(REGION_NAMES),
+        examples=["DE", "DE,AT"],
+    ),
+]
+Zones = Annotated[
+    str,
+    Query(
+        description="One or more bidding zones, comma-separated:\n\n" + _bullets(ZONE_NAMES),
+        examples=["DE-LU", "DE-LU,FR,NL"],
+    ),
+]
+TIMES = (
+    "`ts_utc` is the slot start in UTC, ISO 8601 with `Z`. `local_date` is the slot's date in "
+    "Europe/Berlin, so a day has 23 or 25 hours when daylight saving time starts or ends."
+)
+ERRORS = {
+    413: {"description": "Over 400,000 values: pick `fields`, narrow the dates, or use `/v2/bulk`"},
+    422: {"description": "Unknown region, zone, field or resolution, or start after end"},
+    503: {"description": "No export published yet"},
+}
+
+
+def _example(rows: list[dict], csv_text: str) -> dict:
+    return {
+        200: {
+            "description": "Rows, oldest first per area. Gzipped when the client accepts it.",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "attribution": ATTRIBUTION,
+                        "resolution": "15min",
+                        "start": "2026-06-14",
+                        "end": "2026-06-14",
+                        "rows": rows,
+                    }
+                },
+                "text/csv": {"example": csv_text},
+            },
+        },
+        **ERRORS,
+    }
 
 
 def _list(value: str, allowed: tuple[str, ...], name: str) -> list[str]:
     items = [v.strip() for v in value.split(",") if v.strip()]
     unknown = [v for v in items if v not in allowed]
     if unknown or not items:
-        raise HTTPException(422, f"unknown {name}: {', '.join(unknown) or '(none)'}; "
-                                 f"choose from {', '.join(allowed)}")  # fmt: skip
+        raise HTTPException(
+            422,
+            f"unknown {name}: {', '.join(unknown) or '(none)'}; choose from {', '.join(allowed)}",
+        )
     return list(dict.fromkeys(items))
 
 
 def _window(
-    data: GoldData, table: str, areas: list[str], start: date | None, end: date | None,
+    data: GoldData,
+    table: str,
+    areas: list[str],
+    start: date | None,
+    end: date | None,
     resolution: Resolution,
-) -> tuple[date, date] | None:  # fmt: skip
+) -> tuple[date, date] | None:
     """Resolve the requested local dates. A missing bound lies the default span from the
     other; with neither, the window ends on the latest date that has data.
     """
@@ -108,9 +206,15 @@ def _window(
 
 
 def _select(
-    data: GoldData, table: str, area_column: str, areas: list[str], start: date | None,
-    end: date | None, resolution: Resolution, fields: str | None,
-) -> tuple[pa.Table, tuple[date, date] | None]:  # fmt: skip
+    data: GoldData,
+    table: str,
+    area_column: str,
+    areas: list[str],
+    start: date | None,
+    end: date | None,
+    resolution: Resolution,
+    fields: str | None,
+) -> tuple[pa.Table, tuple[date, date] | None]:
     window = _window(data, table, areas, start, end, resolution)
     columns = [c for c in data.columns(table) if c not in INTERNAL]
     date_column = "month" if resolution == Resolution.MONTH else "local_date"
@@ -177,16 +281,58 @@ def respond(request: Request, rows: pa.Table, fmt: Format, meta: dict) -> Respon
 router = APIRouter(prefix="/v2")
 
 
+GRID_EXAMPLE = [
+    {
+        "region": "DE",
+        "ts_utc": "2026-06-14T10:00:00Z",
+        "local_date": "2026-06-14",
+        "load_mwh": 11372.17,
+        "solar_mwh": 8070.7,
+        "wind_onshore_mwh": 5185.1,
+        "solar_forecast_error_mwh": -289.21,
+    },
+]
+PRICE_EXAMPLE = [
+    {
+        "zone": "DE-LU",
+        "ts_utc": "2026-06-14T10:00:00Z",
+        "local_date": "2026-06-14",
+        "price_eur_mwh": -11.87,
+        "spread_to_de_lu_eur_mwh": 0.0,
+        "source_zone": "DE-LU",
+        "source_resolution": "quarterhour",
+    },
+]
+
+
 @router.get(
     "/grid",
-    summary="Load, generation by source, forecasts and derived features per grid region",
-    description="Regions: " + ", ".join(GRID_REGIONS) + ". A series SMARD does not publish "
-    "for a region is null. Energy in MWh per slot; day and month sum the hours.",
+    tags=["data"],
+    summary="Load, generation by source, forecasts and features per grid region",
+    description=(
+        "One row per region and slot (or local day or month), every series a column, in MWh "
+        "per slot. A series SMARD does not publish for a region is null, e.g. offshore wind in "
+        "Austria; sums such as `renewable_mwh` count it as zero. Derived columns: "
+        "`*_forecast_error_mwh` (actual minus forecast), `renewable_mwh`, "
+        "`renewable_share_pct` (of load), `net_pumped_storage_mwh`, `is_complete`.\n\n" + TIMES
+    ),
+    responses=_example(
+        GRID_EXAMPLE,
+        "region,ts_utc,local_date,load_mwh,solar_mwh\n"
+        "DE,2026-06-14T10:00:00Z,2026-06-14,11372.17,8070.7\n",
+    ),
+    response_class=Response,
 )
 def grid(
-    request: Request, data: Gold, region: str = "DE", resolution: Res = Resolution.HOUR,
-    start: Start = None, end: End = None, fields: Fields = None, format: Fmt = Format.JSON,
-) -> Response:  # fmt: skip
+    request: Request,
+    data: Gold,
+    region: Regions = "DE",
+    resolution: Res = Resolution.HOUR,
+    start: Start = None,
+    end: End = None,
+    fields: Fields = None,
+    format: Fmt = Format.JSON,
+) -> Response:
     regions = _list(region, GRID_REGIONS, "region")
     rows, window = _select(
         data, f"grid_{SUFFIX[resolution]}", "region", regions, start, end, resolution, fields
@@ -196,14 +342,31 @@ def grid(
 
 @router.get(
     "/prices",
+    tags=["data"],
     summary="Day-ahead prices per bidding zone, with the spread to DE-LU",
-    description="Zones: " + ", ".join(ZONES) + ". DE-LU includes DE-AT-LU until 2018-09-30. "
-    "Day and month give base, peak (08:00-20:00, Monday to Friday) and off-peak prices.",
+    description=(
+        "Prices in EUR/MWh. `spread_to_de_lu_eur_mwh` is the price minus the DE-LU price of the "
+        "same slot. `source_zone` is the zone that cleared it (DE-AT-LU until 2018-09-30). Before "
+        "2025-10-01 the 15-minute prices repeat the hourly price; `source_resolution` says so. "
+        "`day` and `month` give `base_eur_mwh`, `peak_eur_mwh` (08:00-20:00 local, Monday to "
+        "Friday), `off_peak_eur_mwh`, min, max, range and `negative_hours`.\n\n" + TIMES
+    ),
+    responses=_example(
+        PRICE_EXAMPLE,
+        "zone,ts_utc,local_date,price_eur_mwh\nDE-LU,2026-06-14T10:00:00Z,2026-06-14,-11.87\n",
+    ),
+    response_class=Response,
 )
 def prices(
-    request: Request, data: Gold, zone: str = "DE-LU", resolution: Res = Resolution.HOUR,
-    start: Start = None, end: End = None, fields: Fields = None, format: Fmt = Format.JSON,
-) -> Response:  # fmt: skip
+    request: Request,
+    data: Gold,
+    zone: Zones = "DE-LU",
+    resolution: Res = Resolution.HOUR,
+    start: Start = None,
+    end: End = None,
+    fields: Fields = None,
+    format: Fmt = Format.JSON,
+) -> Response:
     zones = _list(zone, ZONES, "zone")
     rows, window = _select(
         data, f"prices_{SUFFIX[resolution]}", "zone", zones, start, end, resolution, fields
@@ -213,14 +376,36 @@ def prices(
 
 @router.get(
     "/revisions",
+    tags=["data"],
     summary="Changes SMARD made to published values",
-    description="One row per change: the old and new value, and how long after the slot it "
-    "was seen. Filter by series column (e.g. load_mwh), area (region or zone) and slot dates.",
+    description=(
+        "One row per change spotgrid saw: `old_value`, `new_value`, `detected_at` (the landing "
+        "that carried it) and `delay_days` after the slot. Changes are caught in the last two "
+        "weeks of data. Without dates, the last 30 days of slots.\n\n" + TIMES
+    ),
+    responses=ERRORS,
+    response_class=Response,
 )
 def revisions(
-    request: Request, data: Gold, series: str | None = None, area: str | None = None,
-    start: Start = None, end: End = None, format: Fmt = Format.JSON,
-) -> Response:  # fmt: skip
+    request: Request,
+    data: Gold,
+    series: Annotated[
+        str | None,
+        Query(
+            description="Series columns, comma-separated, e.g. `load_mwh,price_eur_mwh`",
+            examples=["load_mwh"],
+        ),
+    ] = None,
+    area: Annotated[
+        str | None,
+        Query(
+            description="Regions or zones, comma-separated, e.g. `DE` or `DE-LU`", examples=["DE"]
+        ),
+    ] = None,
+    start: Start = None,
+    end: End = None,
+    format: Fmt = Format.JSON,
+) -> Response:
     end = end or date.today()
     start = start or end - timedelta(days=30)
     if start > end:
@@ -240,7 +425,11 @@ def revisions(
 
 
 @router.get(
-    "/catalog", summary="Every series, region and zone, how far each reaches, and freshness"
+    "/catalog",
+    tags=["metadata"],
+    summary="Every series, region and zone, how far each reaches, and freshness",
+    description="Series with SMARD id, column, unit and where they exist; coverage per series "
+    "and area; every table's columns; when the data was exported and how long ago.",
 )
 def catalog(request: Request, data: Gold) -> JSONResponse:
     manifest = data.manifest()
@@ -278,21 +467,48 @@ def catalog(request: Request, data: Gold) -> JSONResponse:
             for name, t in manifest["tables"].items()
         },
     }
-    return JSONResponse(json.loads(json.dumps(body, default=_json_default)),
-                        headers={"Cache-Control": CACHE_CONTROL})  # fmt: skip
+    return JSONResponse(
+        json.loads(json.dumps(body, default=_json_default)),
+        headers={"Cache-Control": CACHE_CONTROL},
+    )
 
 
 @router.get(
     "/bulk",
+    tags=["data"],
     summary="Download links for whole months as CSV",
-    description="dataset grid or prices, resolution 15min or hour, one area; from and to are "
-    "months (YYYY-MM). Links are valid for an hour.",
+    description="For history too large for one response. One CSV per area and local month, "
+    "with row count and SHA-256. Links are valid for an hour.",
 )
 def bulk(
-    request: Request, data: Gold, dataset: str = "grid", resolution: Res = Resolution.HOUR,
-    area: str = "DE", start: Annotated[str | None, Query(alias="from")] = None,
-    end: Annotated[str | None, Query(alias="to")] = None,
-) -> JSONResponse:  # fmt: skip
+    request: Request,
+    data: Gold,
+    dataset: Annotated[str, Query(description="`grid` or `prices`", examples=["grid"])] = "grid",
+    resolution: Annotated[
+        Resolution, Query(description="`15min` or `hour`; days and months fit one response")
+    ] = Resolution.HOUR,
+    area: Annotated[
+        str, Query(description="One region for `grid`, one zone for `prices`", examples=["DE"])
+    ] = "DE",
+    start: Annotated[
+        str | None,
+        Query(
+            alias="from",
+            description="First month, `YYYY-MM`",
+            pattern=r"^\d{4}-\d{2}$",
+            examples=["2025-01"],
+        ),
+    ] = None,
+    end: Annotated[
+        str | None,
+        Query(
+            alias="to",
+            description="Last month, `YYYY-MM`",
+            pattern=r"^\d{4}-\d{2}$",
+            examples=["2025-12"],
+        ),
+    ] = None,
+) -> JSONResponse:
     if (dataset, resolution) not in BULK_TABLES:
         raise HTTPException(422, "bulk files exist for grid and prices at 15min and hour")
     table = f"{dataset}_{SUFFIX[resolution]}"
@@ -316,15 +532,45 @@ def bulk(
         if first <= month <= last
     ]
     return JSONResponse(
-        {"attribution": ATTRIBUTION, "dataset": dataset, "resolution": resolution.value,
-         "area": area, "files": files},
+        {
+            "attribution": ATTRIBUTION,
+            "dataset": dataset,
+            "resolution": resolution.value,
+            "area": area,
+            "files": files,
+        },
         headers={"Cache-Control": "no-store"},
-    )  # fmt: skip
+    )
 
 
 def _meta(resolution: Resolution, window: tuple[date, date] | None) -> dict:
     first, last = window or (None, None)
     return {"resolution": resolution.value, "start": first, "end": last}
+
+
+DESCRIPTION = f"""
+SMARD's published values, unchanged, joined into one row per area and slot, with revisions
+logged and derived features added.
+
+**Times.** `ts_utc` is the slot start in UTC, ISO 8601 (`2026-06-14T10:00:00Z`). `local_date`
+and the `start`/`end` parameters are dates in Europe/Berlin (`YYYY-MM-DD`); a local day has 23 or
+25 hours when daylight saving time starts or ends. `month` is the first day of the local month.
+
+**Units.** Energy in MWh per slot (a 15-minute slot holds a quarter of an hour's energy);
+prices in EUR/MWh.
+
+**Areas.** Grid data per region: DE, its control areas 50Hertz, Amprion, TenneT and TransnetBW,
+AT and its control area APG, LU and its control area Creos. Prices per bidding zone. Codes in
+`/v2/catalog`.
+
+**Nulls.** A column is null where SMARD does not publish that series for the region, or has not
+published the slot yet.
+
+**Limits.** At most 400,000 values per response (413 otherwise): pick `fields`, narrow the
+dates, or download months from `/v2/bulk`. Send `Accept-Encoding: gzip` for smaller responses.
+
+Data: {ATTRIBUTION}. Provided as is, without warranty of correctness or completeness.
+"""
 
 
 def create_app(
@@ -335,10 +581,7 @@ def create_app(
     app = FastAPI(
         title="spotgrid",
         summary="German and neighbouring power-market data from SMARD, cleaned and joined",
-        description=(
-            f"Data: {ATTRIBUTION}. Dates are local to Europe/Berlin; times are UTC. "
-            "Provided as is, without warranty of correctness or completeness."
-        ),
+        description=DESCRIPTION,
         version="2",
     )
     app.state.gold = data
