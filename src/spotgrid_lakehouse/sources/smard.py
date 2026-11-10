@@ -14,13 +14,17 @@ from types import TracebackType
 
 import httpx
 
+from spotgrid_lakehouse.sources.catalog import BY_ID, SERIES, path_region
+
 BASE_URL = "https://www.smard.de/app/chart_data"
-USER_AGENT = "spotgrid-lakehouse (+https://github.com/varunhs306/spotgrid-lakehouse)"
+USER_AGENT = "spotgrid-lakehouse"
 RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
 SLOT_MS = {"hour": 3_600_000, "quarterhour": 900_000}
 
 
 class Series(IntEnum):
+    """The German series the daily report and alerts watch; the catalog has all of them."""
+
     PRICE_DE_LU = 4169
     PRICE_DE_AT_LU = 251
     LOAD = 410
@@ -37,31 +41,29 @@ class Resolution(StrEnum):
     QUARTERHOUR = "quarterhour"
 
 
-# SMARD ignores the region for prices; the bidding zone is set by the series id.
-_PRICE_REGIONS = {Series.PRICE_DE_LU: "DE-LU", Series.PRICE_DE_AT_LU: "DE-AT-LU"}
+def default_region(series: int) -> str:
+    """SMARD ignores the region for prices; the bidding zone is set by the series id."""
+    info = BY_ID.get(int(series))
+    return path_region(info, "DE") if info else "DE"
 
 
-def default_region(series: Series) -> str:
-    return _PRICE_REGIONS.get(series, "DE")
-
-
-def index_path(series: Series, resolution: Resolution, region: str | None = None) -> str:
+def index_path(series: int, resolution: Resolution, region: str | None = None) -> str:
     region = region or default_region(series)
-    return f"{series.value}/{region}/index_{resolution}.json"
+    return f"{int(series)}/{region}/index_{resolution}.json"
 
 
 def chunk_name(
-    series: Series, resolution: Resolution, start_ms: int, region: str | None = None
+    series: int, resolution: Resolution, start_ms: int, region: str | None = None
 ) -> str:
     region = region or default_region(series)
-    return f"{series.value}_{region}_{resolution}_{start_ms}.json"
+    return f"{int(series)}_{region}_{resolution}_{start_ms}.json"
 
 
 def chunk_path(
-    series: Series, resolution: Resolution, start_ms: int, region: str | None = None
+    series: int, resolution: Resolution, start_ms: int, region: str | None = None
 ) -> str:
     region = region or default_region(series)
-    return f"{series.value}/{region}/{chunk_name(series, resolution, start_ms, region)}"
+    return f"{int(series)}/{region}/{chunk_name(series, resolution, start_ms, region)}"
 
 
 class SmardClient:
@@ -87,12 +89,12 @@ class SmardClient:
         self._clock = clock
         self._last_request_at: float | None = None
 
-    def index(self, series: Series, resolution: Resolution, region: str | None = None) -> list[int]:
+    def index(self, series: int, resolution: Resolution, region: str | None = None) -> list[int]:
         """Start of every weekly chunk, in epoch milliseconds, oldest first."""
         return sorted(self.get_raw(index_path(series, resolution, region)).json()["timestamps"])
 
     def chunk(
-        self, series: Series, resolution: Resolution, start_ms: int, region: str | None = None
+        self, series: int, resolution: Resolution, start_ms: int, region: str | None = None
     ) -> bytes:
         """One weekly chunk exactly as served, so bronze can store it unchanged."""
         return self.get_raw(chunk_path(series, resolution, start_ms, region)).content
@@ -184,15 +186,18 @@ def shape_problems(
 
 
 def check_shapes(client: SmardClient) -> list[str]:
-    """Shape problems in each series' index and its last complete weekly chunk."""
+    """Shape problems in each series' index and its last complete weekly chunk, in the first
+    region SMARD publishes it for.
+    """
     problems = []
-    for series in Series:
+    for info in SERIES:
+        region = path_region(info, info.regions[0])
         for resolution in Resolution:
-            index = client.get_raw(index_path(series, resolution)).json()
+            index = client.get_raw(index_path(info.id, resolution, region)).json()
             start = sorted(index["timestamps"])[-2]
-            chunk = json.loads(client.chunk(series, resolution, start))
+            chunk = json.loads(client.chunk(info.id, resolution, start, region))
             problems += [
-                f"{series.name} {resolution}: {problem}"
+                f"{info.id} {region} {resolution}: {problem}"
                 for problem in shape_problems(index, chunk, resolution, start)
             ]
     return problems
