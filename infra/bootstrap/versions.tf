@@ -9,7 +9,7 @@ terraform {
   }
 
   # Partial config: the bucket name contains the account ID, so it is passed at init.
-  # The first apply runs on local state; see docs/runbooks/aws-bootstrap.md.
+  # The first apply runs on local state, from a laptop with an admin profile.
   backend "s3" {
     key          = "bootstrap/terraform.tfstate"
     region       = "us-east-1"
