@@ -1,135 +1,75 @@
 version: 2
 
 models:
-  - name: hourly_features
+  - name: grid_quarterhour
     description: >
-      One row per UTC hour: day-ahead price, load, wind and solar actuals and forecasts, and
-      residual load. Bundesnetzagentur | SMARD.de (CC BY 4.0).
-    # The forecast project reads this table. Renaming, retyping or dropping a column breaks
-    # it, so the build fails until the contract and contracts/hourly_features.json change too.
-    config:
-      contract:
-        enforced: true
-    columns:
-      - name: ts_utc
-        data_type: timestamp
-        description: Hour start
-        constraints: [{type: not_null}]
-        data_tests: [unique]
-      - name: local_date
-        data_type: date
-        description: Hour start date in Europe/Berlin
-        constraints: [{type: not_null}]
-      - name: price_zone
-        data_type: string
-        description: Bidding zone of the price, DE-AT-LU until 2018-09-30, DE-LU after
-        data_tests:
-          - accepted_values:
-              arguments:
-                values: ["DE-LU", "DE-AT-LU"]
-      - name: price_eur_mwh
-        data_type: double
-        description: Day-ahead price in price_zone
-      - name: load_mwh
-        data_type: double
-        description: Grid load
-      - name: wind_onshore_mwh
-        data_type: double
-      - name: wind_offshore_mwh
-        data_type: double
-      - name: solar_mwh
-        data_type: double
-      - name: forecast_wind_onshore_mwh
-        data_type: double
-      - name: forecast_wind_offshore_mwh
-        data_type: double
-      - name: forecast_solar_mwh
-        data_type: double
-      - name: residual_load_mwh
-        data_type: double
-        description: Load minus wind and solar generation; null until all four are published
-      - name: source_resolution
-        data_type: string
-        description: Resolution of the silver rows this hour was built from
-        data_tests:
-          - accepted_values:
-              arguments:
-                values: ["hour"]
-
-  - name: quarterhour_features
-    description: >
-      One row per UTC quarter-hour since 2025-10-01, the first day of 15-minute day-ahead
-      prices. Volumes are MWh per quarter-hour. Bundesnetzagentur | SMARD.de (CC BY 4.0).
-    columns:
-      - name: ts_utc
-        description: Quarter-hour start
-        data_tests: [unique, not_null]
-      - name: local_date
-        description: Quarter-hour start date in Europe/Berlin
+      One row per grid region and UTC quarter-hour: load, residual load, generation by source,
+      pumped storage, forecasts and derived features. A series SMARD does not publish for a
+      region is null. Bundesnetzagentur | SMARD.de (CC BY 4.0).
+    columns: &grid_columns
+      - name: region
+        description: DE, AT, LU, a German control area (50Hertz, Amprion, TenneT, TransnetBW), APG or Creos
         data_tests: [not_null]
-      - name: price_eur_mwh
-        description: Day-ahead price, bidding zone DE-LU
-
-  - name: daily_price_summary
-    description: Day-ahead price statistics per German local day.
-    columns:
+      - name: ts_utc
+        description: Slot start
+        data_tests: [not_null]
       - name: local_date
-        data_tests: [unique, not_null]
-      - name: negative_price_hours
-        description: Hours with a price below zero
-      - name: price_hours
-        description: Hours with a published price; 23 or 25 on daylight-saving days
+        description: Slot start date in Europe/Berlin
+      - name: renewable_mwh
+        description: Wind onshore and offshore, solar, hydropower, biomass and other renewables
+      - name: renewable_share_pct
+        description: renewable_mwh over load_mwh
+      - name: net_pumped_storage_mwh
+        description: Pumped-storage generation minus pumped-storage consumption
+      - name: is_complete
+        description: Every actual SMARD publishes for the region is in; forecasts do not count
+      - name: updated_at
+        description: When spotgrid last changed a value in the row
+
+  - name: grid_hourly
+    description: As grid_quarterhour, per UTC hour.
+    columns: *grid_columns
+
+  - name: grid_daily
+    description: >
+      Energy per region and German local day, summed from grid_hourly; shares recomputed from
+      the sums. is_complete also needs every hour of the day (23, 24 or 25).
+
+  - name: grid_monthly
+    description: As grid_daily, per German local month.
+
+  - name: prices_quarterhour
+    description: >
+      Day-ahead price per bidding zone and UTC quarter-hour, with the spread to DE-LU. Before
+      2025-10-01 SMARD's quarter-hours repeat the hourly price; source_resolution says so.
+    columns: &price_columns
+      - name: zone
+        description: Bidding zone; DE-LU includes DE-AT-LU until 2018-09-30
+        data_tests: [not_null]
+      - name: ts_utc
+        data_tests: [not_null]
+      - name: source_zone
+        description: Zone that cleared the price
+      - name: spread_to_de_lu_eur_mwh
+        description: Price minus the DE-LU price of the same slot
+
+  - name: prices_hourly
+    description: As prices_quarterhour, per UTC hour.
+    columns: *price_columns
+
+  - name: prices_daily
+    description: >
+      Base, peak (08:00-20:00 local, Monday to Friday) and off-peak price, range and negative
+      hours per zone and German local day, from prices_hourly.
+
+  - name: prices_monthly
+    description: As prices_daily, per German local month.
+
+  - name: revisions
+    description: Every change SMARD made to a published value, from the revisions log.
 
   - name: revision_stats
-    description: >
-      How often, how late and by how much SMARD revised each series since landing began.
-      Changes are in the series' unit, EUR/MWh for prices and MWh per slot for volumes.
-    columns:
-      - name: series_id
-        data_tests: [not_null]
-      - name: slots
-        description: Slots in silver
-      - name: revisions
-        description: Changes to published values; a slot can change more than once
-      - name: revised_slots_pct
-        description: Share of slots changed at least once, in percent
-      - name: median_delay_days
-        description: Median days from slot start to the landing that carried the change
-      - name: median_change_pct
-        description: Median change relative to the old value, in percent
-      - name: observed_since
-        description: First landing; earlier revisions were never seen
+    description: How often, how late and by how much SMARD revises each series and area.
 
-  - name: generation_mix_monthly
-    description: >
-      Energy by source and the share of load met by wind and solar, per German local month.
-      Counts only hours with load and all three generation series.
-    columns:
-      - name: month
-        description: First day of the local month
-        data_tests: [unique, not_null]
-      - name: is_complete
-        description: Every hour of the month is counted
-      - name: wind_solar_share_pct
-        description: Wind onshore, offshore and solar generation over load, in percent
-
-unit_tests:
-  - name: revision_stats_on_known_revisions
-    model: revision_stats
-    given:
-      - input: source("silver", "smard_timeseries")
-        rows:
-          - {series_id: 1225, region: DE, resolution: hour, ts_utc: "2026-07-01 00:00:00", first_seen_at: "2026-07-01 12:00:00"}
-          - {series_id: 1225, region: DE, resolution: hour, ts_utc: "2026-07-01 01:00:00", first_seen_at: "2026-07-01 12:00:00"}
-          - {series_id: 1225, region: DE, resolution: hour, ts_utc: "2026-07-01 02:00:00", first_seen_at: "2026-07-01 12:00:00"}
-          - {series_id: 1225, region: DE, resolution: hour, ts_utc: "2026-07-01 03:00:00", first_seen_at: "2026-07-01 12:00:00"}
-          - {series_id: 4169, region: DE-LU, resolution: hour, ts_utc: "2026-07-01 00:00:00", first_seen_at: "2026-06-30 12:00:00"}
-      - input: source("silver", "revisions")
-        rows:
-          - {series_id: 1225, region: DE, resolution: hour, ts_utc: "2026-07-01 00:00:00", old_value: 10, new_value: 12, detected_at: "2026-07-03 00:00:00"}
-          - {series_id: 1225, region: DE, resolution: hour, ts_utc: "2026-07-01 00:00:00", old_value: 12, new_value: 11, detected_at: "2026-07-11 00:00:00"}
-          - {series_id: 1225, region: DE, resolution: hour, ts_utc: "2026-07-01 01:00:00", old_value: 100, new_value: 90, detected_at: "2026-07-05 01:00:00"}
-    expect:
-      rows:
-        - {series_id: 1225, series_name: WIND_OFFSHORE, slots: 4, revisions: 3, revised_slots: 2, revised_slots_pct: 50.0, median_delay_days: 4.0, p95_delay_days: 9.4, max_delay_days: 10.0, median_abs_change: 2.0, p95_abs_change: 9.2, max_abs_change: 10.0, median_change_pct: 10.0, last_revision_at: "2026-07-11 00:00:00"}
-        - {series_id: 4169, series_name: PRICE_DE_LU, slots: 1, revisions: 0, revised_slots: 0, revised_slots_pct: 0.0, median_delay_days: null, p95_delay_days: null, max_delay_days: null, median_abs_change: null, p95_abs_change: null, max_abs_change: null, median_change_pct: null, last_revision_at: null}
+  - name: coverage
+    description: First and last slot and last change per series, area and resolution.

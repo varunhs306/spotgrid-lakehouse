@@ -2,13 +2,12 @@ version: 2
 
 sources:
   - name: silver
-    database: workspace
     schema: silver
     tables:
       - name: smard_timeseries
         description: >
           SMARD series at native resolution, one row per series, region, resolution and slot.
-          Built by the silver_smard job. Bundesnetzagentur | SMARD.de (CC BY 4.0).
+          Built by spotgrid_lakehouse.transforms.smard. Bundesnetzagentur | SMARD.de (CC BY 4.0).
         # The morning run always lands yesterday's actuals, so a value changes every day.
         config:
           loaded_at_field: last_changed_at
@@ -23,7 +22,7 @@ sources:
           - name: value
             data_tests: [not_null]
       - name: revisions
-        description: One row per change SMARD made to a published value. Built by the silver_smard job.
+        description: One row per change SMARD made to a published value.
         columns:
           - name: ts_utc
             data_tests: [not_null]

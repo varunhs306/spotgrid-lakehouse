@@ -1,23 +1,12 @@
-# Connection comes from the environment; see docs/runbooks/databricks-workspace.md.
 spotgrid:
   target: local
   outputs:
     local:
-      type: databricks
-      catalog: workspace
+      type: duckdb
+      path: "{{ env_var('WAREHOUSE', 'warehouse.duckdb') }}"
       schema: gold
-      host: "{{ env_var('DATABRICKS_HOST') | replace('https://', '') }}"
-      http_path: "{{ env_var('DATABRICKS_HTTP_PATH') }}"
-      token: "{{ env_var('DATABRICKS_TOKEN') }}"
-      threads: 4
-    # The daily workflow, as the pipeline's service principal.
-    ci:
-      type: databricks
-      catalog: workspace
-      schema: gold
-      host: "{{ env_var('DATABRICKS_HOST') | replace('https://', '') }}"
-      http_path: "{{ env_var('DATABRICKS_HTTP_PATH') }}"
-      auth_type: oauth
-      client_id: "{{ env_var('DATABRICKS_CLIENT_ID') }}"
-      client_secret: "{{ env_var('DATABRICKS_CLIENT_SECRET') }}"
-      threads: 4
+      threads: 1
+      settings:
+        TimeZone: UTC
+        preserve_insertion_order: false
+        memory_limit: "{{ env_var('DUCKDB_MEMORY_LIMIT', '1.5GB') }}"
