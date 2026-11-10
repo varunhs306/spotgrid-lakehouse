@@ -3,7 +3,8 @@
 
 locals {
   account_id = data.aws_caller_identity.current.account_id
-  arn_prefix = "arn:aws:%s:${var.region}:${local.account_id}"
+  # The workload lives in var.workload_region; this stack (state bucket) in var.region.
+  arn_prefix = "arn:aws:%s:${var.workload_region}:${local.account_id}"
 
   state_objects = "${aws_s3_bucket.tf_state.arn}/infra/*"
   ci_role_arns  = "arn:aws:iam::${local.account_id}:role/spotgrid-ci-*"
@@ -11,11 +12,16 @@ locals {
   workload_pol  = "arn:aws:iam::${local.account_id}:policy/spotgrid-*"
   boundary_arn  = "arn:aws:iam::${local.account_id}:policy/spotgrid-workload-boundary"
 
-  # Certificate and distribution IDs are generated, so these cover the whole account.
-  certificates   = "${format(local.arn_prefix, "acm")}:certificate/*"
-  distributions  = "arn:aws:cloudfront::${local.account_id}:distribution/*"
-  cache_policies = "arn:aws:cloudfront::${local.account_id}:cache-policy/*"
-  http_apis      = [for path in ["/apis", "/apis/*", "/domainnames", "/domainnames/*", "/tags/*"] : "arn:aws:apigateway:${var.region}::${path}"]
+  # Certificate IDs are generated, so this covers the whole region.
+  certificates = "${format(local.arn_prefix, "acm")}:certificate/*"
+  http_apis    = [for path in ["/apis", "/apis/*", "/domainnames", "/domainnames/*", "/tags/*"] : "arn:aws:apigateway:${var.workload_region}::${path}"]
+  buckets      = ["arn:aws:s3:::spotgrid-serving-*", "arn:aws:s3:::spotgrid-lake-*"]
+  objects      = [for b in local.buckets : "${b}/*"]
+  log_groups   = ["${format(local.arn_prefix, "logs")}:log-group:/aws/lambda/spotgrid-*", "${format(local.arn_prefix, "logs")}:log-group:/spotgrid/*"]
+  ecr_repos    = "${format(local.arn_prefix, "ecr")}:repository/spotgrid-*"
+  ssm_params   = "${format(local.arn_prefix, "ssm")}:parameter/spotgrid/*"
+  cluster      = "${format(local.arn_prefix, "ecs")}:cluster/spotgrid"
+  schedules    = ["${format(local.arn_prefix, "scheduler")}:schedule/spotgrid/spotgrid-*", "${format(local.arn_prefix, "scheduler")}:schedule-group/spotgrid"]
 }
 
 data "aws_iam_policy_document" "github_trust" {
@@ -70,7 +76,7 @@ data "aws_iam_policy_document" "ci_read" {
   statement {
     sid       = "ReadBuckets"
     actions   = ["s3:GetBucket*", "s3:GetLifecycleConfiguration", "s3:GetEncryptionConfiguration", "s3:GetAccelerateConfiguration", "s3:GetReplicationConfiguration", "s3:ListBucket"]
-    resources = ["arn:aws:s3:::spotgrid-serving-*"]
+    resources = local.buckets
   }
 
   statement {
@@ -88,19 +94,31 @@ data "aws_iam_policy_document" "ci_read" {
   statement {
     sid       = "ReadLogs"
     actions   = ["logs:ListTagsForResource"]
-    resources = ["${format(local.arn_prefix, "logs")}:log-group:/aws/lambda/spotgrid-*"]
+    resources = local.log_groups
   }
 
   statement {
-    sid       = "DescribeUnscoped"
-    actions   = ["logs:DescribeLogGroups", "cloudwatch:DescribeAlarms"]
+    sid = "DescribeUnscoped"
+    actions = [
+      "logs:DescribeLogGroups", "cloudwatch:DescribeAlarms", "ec2:Describe*",
+      "ecs:DescribeTaskDefinition", "ecr:GetAuthorizationToken", "ssm:DescribeParameters",
+    ]
     resources = ["*"]
   }
 
   statement {
     sid       = "ReadSchedules"
-    actions   = ["scheduler:GetSchedule"]
-    resources = ["${format(local.arn_prefix, "scheduler")}:schedule/default/spotgrid-*"]
+    actions   = ["scheduler:GetSchedule", "scheduler:GetScheduleGroup", "scheduler:ListTagsForResource"]
+    resources = local.schedules
+  }
+
+  statement {
+    sid = "ReadPipeline"
+    actions = [
+      "ecr:Describe*", "ecr:GetLifecyclePolicy", "ecr:ListTagsForResource", "ecs:DescribeClusters",
+      "ecs:ListTagsForResource", "ssm:GetParameter*", "ssm:ListTagsForResource",
+    ]
+    resources = [local.ecr_repos, local.cluster, local.ssm_params]
   }
 
   statement {
@@ -122,12 +140,6 @@ data "aws_iam_policy_document" "ci_read" {
   }
 
   statement {
-    sid       = "ReadCdn"
-    actions   = ["cloudfront:GetDistribution", "cloudfront:GetDistributionConfig", "cloudfront:ListTagsForResource", "cloudfront:GetCachePolicy", "cloudfront:GetCachePolicyConfig"]
-    resources = [local.distributions, local.cache_policies]
-  }
-
-  statement {
     sid       = "ReadHttpApis"
     actions   = ["apigateway:GET"]
     resources = local.http_apis
@@ -142,9 +154,9 @@ data "aws_iam_policy_document" "ci_write" {
   }
 
   statement {
-    sid       = "ManageServingBuckets"
+    sid       = "ManageBuckets"
     actions   = ["s3:*"]
-    resources = ["arn:aws:s3:::spotgrid-serving-*", "arn:aws:s3:::spotgrid-serving-*/*"]
+    resources = concat(local.buckets, local.objects)
   }
 
   statement {
@@ -156,13 +168,58 @@ data "aws_iam_policy_document" "ci_write" {
   statement {
     sid       = "ManageLogs"
     actions   = ["logs:*"]
-    resources = ["${format(local.arn_prefix, "logs")}:log-group:/aws/lambda/spotgrid-*"]
+    resources = local.log_groups
   }
 
   statement {
-    sid       = "ManageSchedules"
-    actions   = ["scheduler:CreateSchedule", "scheduler:UpdateSchedule", "scheduler:DeleteSchedule"]
-    resources = ["${format(local.arn_prefix, "scheduler")}:schedule/default/spotgrid-*"]
+    sid = "ManageSchedules"
+    actions = [
+      "scheduler:CreateSchedule", "scheduler:UpdateSchedule", "scheduler:DeleteSchedule",
+      "scheduler:CreateScheduleGroup", "scheduler:DeleteScheduleGroup",
+      "scheduler:TagResource", "scheduler:UntagResource",
+    ]
+    resources = local.schedules
+  }
+
+  # Push images; manage the pipeline's repository, cluster and secrets.
+  statement {
+    sid = "ManagePipeline"
+    actions = [
+      "ecr:*", "ecs:CreateCluster", "ecs:DeleteCluster", "ecs:UpdateCluster", "ecs:TagResource",
+      "ecs:UntagResource", "ssm:PutParameter", "ssm:DeleteParameter", "ssm:AddTagsToResource",
+      "ssm:RemoveTagsFromResource",
+    ]
+    resources = [local.ecr_repos, local.cluster, local.ssm_params]
+  }
+
+  # Registering a task definition has no resource-level permissions.
+  statement {
+    sid       = "ManageTaskDefinitions"
+    actions   = ["ecs:RegisterTaskDefinition", "ecs:DeregisterTaskDefinition"]
+    resources = ["*"]
+  }
+
+  # The pipeline's VPC: subnets, gateways, routes, the S3 endpoint and the security group.
+  statement {
+    sid = "ManageNetwork"
+    actions = [
+      "ec2:CreateVpc", "ec2:DeleteVpc", "ec2:ModifyVpcAttribute", "ec2:CreateSubnet",
+      "ec2:DeleteSubnet", "ec2:ModifySubnetAttribute", "ec2:CreateInternetGateway",
+      "ec2:DeleteInternetGateway", "ec2:AttachInternetGateway", "ec2:DetachInternetGateway",
+      "ec2:CreateRouteTable", "ec2:DeleteRouteTable", "ec2:CreateRoute", "ec2:DeleteRoute",
+      "ec2:AssociateRouteTable", "ec2:DisassociateRouteTable", "ec2:CreateVpcEndpoint",
+      "ec2:DeleteVpcEndpoints", "ec2:ModifyVpcEndpoint", "ec2:CreateSecurityGroup",
+      "ec2:DeleteSecurityGroup", "ec2:AuthorizeSecurityGroupEgress",
+      "ec2:RevokeSecurityGroupEgress", "ec2:AuthorizeSecurityGroupIngress",
+      "ec2:RevokeSecurityGroupIngress", "ec2:CreateTags", "ec2:DeleteTags",
+    ]
+    resources = ["*"]
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:RequestedRegion"
+      values   = [var.workload_region]
+    }
   }
 
   statement {
@@ -181,16 +238,6 @@ data "aws_iam_policy_document" "ci_write" {
     sid       = "ManageCertificates"
     actions   = ["acm:RequestCertificate", "acm:DeleteCertificate", "acm:AddTagsToCertificate", "acm:RemoveTagsFromCertificate"]
     resources = [local.certificates]
-  }
-
-  statement {
-    sid = "ManageCdn"
-    actions = [
-      "cloudfront:CreateDistribution", "cloudfront:CreateDistributionWithTags", "cloudfront:UpdateDistribution", "cloudfront:DeleteDistribution",
-      "cloudfront:TagResource", "cloudfront:UntagResource",
-      "cloudfront:CreateCachePolicy", "cloudfront:UpdateCachePolicy", "cloudfront:DeleteCachePolicy",
-    ]
-    resources = [local.distributions, local.cache_policies]
   }
 
   statement {
@@ -234,7 +281,19 @@ data "aws_iam_policy_document" "ci_write" {
     condition {
       test     = "StringEquals"
       variable = "iam:PassedToService"
-      values   = ["lambda.amazonaws.com", "scheduler.amazonaws.com"]
+      values   = ["lambda.amazonaws.com", "scheduler.amazonaws.com", "ecs-tasks.amazonaws.com"]
+    }
+  }
+
+  statement {
+    sid       = "EcsServiceLinkedRole"
+    actions   = ["iam:CreateServiceLinkedRole"]
+    resources = ["arn:aws:iam::${local.account_id}:role/aws-service-role/ecs.amazonaws.com/*"]
+
+    condition {
+      test     = "StringEquals"
+      variable = "iam:AWSServiceName"
+      values   = ["ecs.amazonaws.com"]
     }
   }
 
@@ -253,24 +312,68 @@ data "aws_iam_policy_document" "ci_write" {
   }
 }
 
-# Ceiling for every role the apply role creates (Lambda API, its warm-up schedule, export jobs).
+# Ceiling for every role the apply role creates: the API and probe Lambdas, their schedule,
+# and the pipeline task, its execution role and its schedule.
 data "aws_iam_policy_document" "workload_boundary" {
+  #checkov:skip=CKV_AWS_356:GetAuthorizationToken and PutMetricData have no resource-level permissions
   statement {
-    sid       = "ServingData"
+    sid       = "Data"
     actions   = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:ListBucket"]
-    resources = ["arn:aws:s3:::spotgrid-serving-*", "arn:aws:s3:::spotgrid-serving-*/*"]
+    resources = concat(local.buckets, local.objects)
   }
 
   statement {
-    sid       = "LambdaLogs"
+    sid       = "Logs"
     actions   = ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"]
-    resources = ["${format(local.arn_prefix, "logs")}:log-group:/aws/lambda/spotgrid-*"]
+    resources = [for g in local.log_groups : "${g}:*"]
   }
 
   statement {
-    sid       = "InvokeApi"
+    sid       = "InvokeFunctions"
     actions   = ["lambda:InvokeFunction"]
-    resources = ["${format(local.arn_prefix, "lambda")}:function:spotgrid-api"]
+    resources = ["${format(local.arn_prefix, "lambda")}:function:spotgrid-*"]
+  }
+
+  statement {
+    sid       = "PullImage"
+    actions   = ["ecr:BatchGetImage", "ecr:GetDownloadUrlForLayer", "ecr:BatchCheckLayerAvailability"]
+    resources = [local.ecr_repos]
+  }
+
+  statement {
+    sid       = "Unscoped"
+    actions   = ["ecr:GetAuthorizationToken", "cloudwatch:PutMetricData"]
+    resources = ["*"]
+  }
+
+  statement {
+    sid       = "Secrets"
+    actions   = ["ssm:GetParameters"]
+    resources = [local.ssm_params]
+  }
+
+  statement {
+    sid       = "Alerts"
+    actions   = ["sns:Publish"]
+    resources = ["${format(local.arn_prefix, "sns")}:spotgrid-*"]
+  }
+
+  statement {
+    sid       = "RunPipeline"
+    actions   = ["ecs:RunTask", "ecs:TagResource"]
+    resources = ["${format(local.arn_prefix, "ecs")}:task-definition/spotgrid-*", "${format(local.arn_prefix, "ecs")}:task/spotgrid/*"]
+  }
+
+  statement {
+    sid       = "PassPipelineRoles"
+    actions   = ["iam:PassRole"]
+    resources = ["arn:aws:iam::${local.account_id}:role/spotgrid-pipeline-*"]
+
+    condition {
+      test     = "StringEquals"
+      variable = "iam:PassedToService"
+      values   = ["ecs-tasks.amazonaws.com"]
+    }
   }
 }
 

@@ -16,3 +16,9 @@ variable "budget_alert_email" {
   type        = string
   description = "Address that receives budget alerts; kept out of the repo"
 }
+
+variable "workload_region" {
+  type        = string
+  description = "Region of the serving stack in infra/"
+  default     = "eu-central-1"
+}
