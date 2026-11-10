@@ -1,6 +1,6 @@
 [project]
 name = "spotgrid-lakehouse"
-version = "0.1.0"
+version = "0.2.0"
 description = "Lakehouse for German power-market data"
 authors = [
     { name = "varunhs306", email = "varunhs306@gmail.com" }
@@ -8,8 +8,7 @@ authors = [
 requires-python = ">=3.12"
 dependencies = [
     "boto3>=1.43.110",
-    "databricks-sdk>=0.148.0",
-    "databricks-sql-connector>=4.0",
+    "duckdb>=1.5.6,<1.6",
     "httpx>=0.28",
     "pyarrow>=26.0.0",
 ]
@@ -18,13 +17,19 @@ dependencies = [
 # What the Lambda zip ships; boto3 comes with the Lambda runtime.
 api = [
     "fastapi>=0.140",
+    "httpx>=0.28",
     "mangum>=0.22",
     "pyarrow>=26.0.0",
 ]
+# What the pipeline container adds to the package.
+pipeline = [
+    "dbt-core>=1.12.6,<1.13",
+    "dbt-duckdb>=1.11.1,<1.12",
+]
 dev = [
     { include-group = "api" },
+    { include-group = "pipeline" },
     "jsonschema>=4.26.0",
-    "pyspark>=4.2.0",
     "pytest>=8",
     "pyyaml>=6.0.3",
     "ruff>=0.13",

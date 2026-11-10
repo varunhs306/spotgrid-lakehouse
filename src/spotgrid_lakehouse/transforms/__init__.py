@@ -1,1 +1,1 @@
-"""Bronze payloads to silver tables, with PySpark."""
+"""Bronze payloads to silver tables, with DuckDB."""
