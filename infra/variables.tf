@@ -1,18 +1,11 @@
 variable "region" {
   type    = string
-  default = "us-east-1"
-}
-
-# Same immutable subject as infra/bootstrap: owner and repo IDs, not just names.
-variable "github_sub_prefix" {
-  type        = string
-  description = "OIDC sub claim prefix of the repository whose workflows may assume the export role"
-  default     = "repo:varunhs306@53350637/spotgrid-lakehouse@1398649456"
+  default = "eu-central-1"
 }
 
 variable "alarm_email" {
   type        = string
-  description = "Address that receives API alarms; kept out of the repo"
+  description = "Address that receives alarms; kept out of the repo"
   # Plans are posted on public pull requests.
   sensitive = true
 }
@@ -28,7 +21,14 @@ variable "api_domain" {
   default = "api.spotgrid.quarrylabs.dev"
 }
 
-variable "api_cdn" {
-  type    = bool
-  default = false
+variable "pipeline_image_tag" {
+  type        = string
+  description = "Tag of the pipeline image in ECR; CI passes the commit SHA"
+  default     = "latest"
+}
+
+variable "github_repository" {
+  type        = string
+  description = "owner/name for incident and data-quality issues and data releases"
+  default     = "varunhs306/spotgrid-lakehouse"
 }
