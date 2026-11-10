@@ -24,12 +24,12 @@ LANDING = {
 }
 MANIFEST = {
     "exported_at": "2026-10-12T15:21:00+00:00",
-    "tables": {"hourly_features": {"rows": 18192, "max_time": "2026-10-13T21:00:00+00:00"}},
+    "tables": {"grid_hourly": {"rows": 18192, "max_time": "2026-10-13T21:00:00+00:00"}},
 }
 DBT = {
     "results": [
-        {"unique_id": "model.spotgrid.hourly_features", "status": "success"},
-        {"unique_id": "test.spotgrid.unique_hourly_features_ts_utc", "status": "pass"},
+        {"unique_id": "model.spotgrid.grid_hourly", "status": "success"},
+        {"unique_id": "test.spotgrid.unique_grid_hourly_ts_utc", "status": "pass"},
         {"unique_id": "test.spotgrid.not_null_daily_price_summary_local_date", "status": "fail"},
         {"unique_id": "model.spotgrid.daily_price_summary", "status": "skipped"},
     ]
@@ -189,7 +189,7 @@ def test_markdown_summary():
     assert "| merge silver | ✅ | 2m09s |" in text
     assert "| PRICE_DE_LU hour | 2 | 1 | 2026-10-05 → 2026-10-18 |" in text
     assert "| SOLAR | 0 | 40 |" in text
-    assert "| hourly_features | 18,192 | 2026-10-13T21:00:00+00:00 |" in text
+    assert "| grid_hourly | 18,192 | 2026-10-13T21:00:00+00:00 |" in text
     assert "✅ 120 ms, data exported 3 min ago" in text
     assert (
         "- ⚠️ [Missing hours: PRICE_DE_LU](https://github.com/o/r/issues/7): 2026-10-10 0/24 h"
@@ -236,7 +236,7 @@ def test_markdown_of_a_failed_run_skips_missing_sections():
 
 def test_check_api():
     def handler(request):
-        assert request.url.path == "/v1/freshness"
+        assert request.url.path == "/v2/catalog"
         return httpx.Response(200, json={"age_minutes": 5})
 
     http = httpx.Client(transport=httpx.MockTransport(handler))
@@ -251,16 +251,17 @@ def test_check_api():
 
 def test_check_api_reads_tomorrows_prices():
     def handler(request):
-        if request.url.path == "/v1/prices/daily":
+        if request.url.path == "/v2/prices":
             assert request.url.params["start"] == "2026-10-13"
-            return httpx.Response(200, json={"rows": [{"avg_price_eur_mwh": 197.2}]})
+            assert request.url.params["resolution"] == "day"
+            return httpx.Response(200, json={"rows": [{"base_eur_mwh": 197.2}]})
         return httpx.Response(200, json={"age_minutes": 0})
 
     http = httpx.Client(transport=httpx.MockTransport(handler))
 
     result = check_api("https://api.example", date(2026, 10, 13), http)
 
-    assert result["tomorrow"] == {"avg_price_eur_mwh": 197.2}
+    assert result["tomorrow"] == {"base_eur_mwh": 197.2}
 
 
 def test_check_api_unreachable():

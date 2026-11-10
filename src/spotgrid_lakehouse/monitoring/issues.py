@@ -172,8 +172,7 @@ def sync_incident(
             "",
             f"Run: {run_url}",
             "",
-            "Each step is safe to rerun; see docs/runbooks/daily-pipeline.md. This issue closes "
-            "itself after the next successful run.",
+            "Each step is safe to rerun. This issue closes itself after the next successful run.",
         ]
     )
     issue = issues.create(title, body, INCIDENT)

@@ -32,9 +32,10 @@ def test_dry_run_writes_the_summary_from_step_reports(tmp_path):
             "--manifest", str(tmp_path / "missing.json"),
             "--outcome", "land bronze=success",
             "--outcome", "merge silver=failure",
+            "--summary", str(summary),
             "--dry-run",
         ],
-        env={"GITHUB_STEP_SUMMARY": str(summary)},
+        env={},
     )  # fmt: skip
 
     text = summary.read_text(encoding="utf-8")
@@ -55,7 +56,7 @@ def test_tomorrow_and_quiet_mornings():
     assert tomorrow(morning) is None
     assert quiet("schedule", morning)
     assert not quiet("schedule", afternoon)
-    assert not quiet("workflow_dispatch", morning)
+    assert not quiet("manual", morning)
 
 
 def test_skipped_processing_cannot_close_an_incident(monkeypatch):
