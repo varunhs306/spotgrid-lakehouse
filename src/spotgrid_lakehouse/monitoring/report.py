@@ -23,36 +23,38 @@ from spotgrid_lakehouse.monitoring.checks import (
     missing_hours,
     price_revisions,
 )
-from spotgrid_lakehouse.sources.smard import Series
+from spotgrid_lakehouse.sources.smard import Series, default_region
 
-SILVER = "workspace.silver.smard_timeseries"
-QUARANTINE = "workspace.silver.quarantine"
-# Step names in .github/workflows/daily.yml, in run order.
+SILVER = "silver.smard_timeseries"
+QUARANTINE = "silver.quarantine"
+# Steps of spotgrid_lakehouse.pipeline, in run order.
 STEPS = ("land bronze", "merge silver", "build gold", "export", "record published source versions")
 # Clean SMARD data quarantines nothing; a day of one series means something changed upstream.
 QUARANTINE_SPIKE = 24
 ICONS = {"success": "✅", "failure": "❌", "cancelled": "⛔", "skipped": "⏭️"}
+# The report watches the German series in their default regions.
+WATCHED = " OR ".join(f"(series_id = {s.value} AND region = '{default_region(s)}')" for s in Series)
 
 # Rows the silver MERGE touched in this run: first landed, or changed by a newer landing.
 SILVER_CHANGES_SQL = f"""
 SELECT series_id, local_date,
-  count_if(first_seen_at >= :started_at) AS inserted,
-  count_if(first_seen_at < :started_at) AS revised
+  count_if(first_seen_at >= $started_at) AS inserted,
+  count_if(first_seen_at < $started_at) AS revised
 FROM {SILVER}
-WHERE resolution = 'hour' AND last_changed_at >= :started_at
+WHERE resolution = 'hour' AND merged_at >= $started_at AND ({WATCHED})
 GROUP BY series_id, local_date
 """
 # Rows this run kept out of silver, by reason.
 QUARANTINE_SQL = f"""
 SELECT reason, count(*) AS rows
 FROM {QUARANTINE}
-WHERE quarantined_at >= :started_at
+WHERE quarantined_at >= $started_at
 GROUP BY reason
 """
 COVERAGE_SQL = f"""
 SELECT series_id, local_date, count(*) AS hours
 FROM {SILVER}
-WHERE resolution = 'hour' AND local_date >= :first_day
+WHERE resolution = 'hour' AND local_date >= $first_day AND ({WATCHED})
 GROUP BY series_id, local_date
 """
 
@@ -104,18 +106,22 @@ def check_api(
     base = url.rstrip("/")
     started = time.monotonic()
     try:
-        response = http.get(f"{base}/v1/freshness")
+        response = http.get(f"{base}/v2/catalog")
         ms = round((time.monotonic() - started) * 1000)
         day = None
         if response.status_code == 200 and tomorrow is not None:
-            params = {"start": tomorrow.isoformat(), "end": tomorrow.isoformat()}
-            prices = http.get(f"{base}/v1/prices/daily", params=params)
+            params = {
+                "resolution": "day",
+                "start": tomorrow.isoformat(),
+                "end": tomorrow.isoformat(),
+            }
+            prices = http.get(f"{base}/v2/prices", params=params)
             prices.raise_for_status()
             rows = prices.json().get("rows", [])
             day = rows[0] if rows else None
         body = response.json() if response.status_code == 200 else {}
         if not isinstance(body, dict):
-            raise ValueError("Invalid freshness response")
+            raise ValueError("Invalid catalog response")
     except (httpx.HTTPError, ValueError) as exc:
         return {"ok": False, "error": type(exc).__name__}
     return {
@@ -241,10 +247,21 @@ def markdown(report: dict, issues: dict[str, str] | None = None) -> str:
     if report["landing"] is not None:
         lines += ["", "### Bronze", "", "| Series | Chunks checked | New | Local days |"]
         lines.append("|---|---|---|---|")
+        others = [e for e in report["landing"] if not e.get("monitored", True)]
         for entry in report["landing"]:
+            if not entry.get("monitored", True):
+                continue
             days = " → ".join(entry["dates"]) if entry["dates"] else "-"
             row = f"{entry['series']} {entry['resolution']}"
             lines.append(f"| {row} | {entry['checked']} | {entry['written']} | {days} |")
+        if others:
+            checked = sum(e["checked"] for e in others)
+            written = sum(e["written"] for e in others)
+            missing = sum(1 for e in others if e.get("unavailable"))
+            label = f"{len(others)} other sources" + (
+                f" ({missing} unpublished)" if missing else ""
+            )
+            lines.append(f"| {label} | {checked} | {written} | - |")
 
     if report["silver"] is not None:
         lines += ["", "### Silver", ""]
@@ -288,7 +305,7 @@ def markdown(report: dict, issues: dict[str, str] | None = None) -> str:
     if freshness := report.get("source_freshness"):
         lines += [
             "",
-            "### Source → publication (no warehouse check)",
+            "### Source → publication",
             "",
             f"Status: **{freshness['status']}**",
         ]
@@ -338,20 +355,25 @@ def markdown(report: dict, issues: dict[str, str] | None = None) -> str:
     return "\n".join(lines) + "\n"
 
 
-def collect_warehouse(
-    http_path: str, started_at: datetime, now: datetime, profile: str | None = None
-) -> tuple[list, list, list]:
+def collect_warehouse(path: str, started_at: datetime, now: datetime) -> tuple[list, list, list]:
     """Silver changes and quarantined rows in this run, and recent coverage; raises if the
-    warehouse is unreachable.
+    warehouse cannot be read.
     """
-    from spotgrid_lakehouse.export.gold import SqlWarehouse
+    import duckdb
 
-    warehouse = SqlWarehouse(http_path, profile)
+    con = duckdb.connect(path, read_only=True)
     try:
-        changes = warehouse.query(SILVER_CHANGES_SQL, {"started_at": started_at}).to_pylist()
+        con.execute("SET TimeZone = 'UTC'")
+
+        def rows(sql: str, params: dict) -> list[dict]:
+            result = con.execute(sql, params)
+            names = [d[0] for d in result.description]
+            return [dict(zip(names, row, strict=True)) for row in result.fetchall()]
+
+        changes = rows(SILVER_CHANGES_SQL, {"started_at": started_at})
         first_day: date = now.date() - timedelta(days=WINDOW_DAYS)
-        coverage = warehouse.query(COVERAGE_SQL, {"first_day": first_day}).to_pylist()
-        quarantine = warehouse.query(QUARANTINE_SQL, {"started_at": started_at}).to_pylist()
+        coverage = rows(COVERAGE_SQL, {"first_day": first_day})
+        quarantine = rows(QUARANTINE_SQL, {"started_at": started_at})
     finally:
-        warehouse.close()
+        con.close()
     return changes, coverage, quarantine

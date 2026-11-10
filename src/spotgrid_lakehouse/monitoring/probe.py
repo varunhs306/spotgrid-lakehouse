@@ -1,4 +1,5 @@
-"""Times the public API the way a visitor sees it: from outside AWS, a new connection per request.
+"""Times the public API the way a visitor sees it: through its public domain, a new connection
+per request. Runs as a scheduled Lambda; a failed endpoint fails the invocation, which alarms.
 
 `run` probes each endpoint once, in random order so no endpoint always comes first after a quiet
 spell, and stores the result in the serving bucket. `summary` gives p50 and p95 per endpoint.
@@ -17,7 +18,13 @@ from datetime import UTC, datetime, timedelta
 
 import httpx
 
-PATHS = ("/v1/prices", "/v1/prices/daily", "/v1/load", "/v1/generation", "/v1/freshness")
+PATHS = (
+    "/v2/grid",
+    "/v2/grid?resolution=day",
+    "/v2/prices",
+    "/v2/prices?resolution=day",
+    "/v2/catalog",
+)
 PREFIX = "probes/"
 
 
@@ -102,6 +109,31 @@ def stored_runs(bucket: str, days: int, now: datetime | None = None) -> list[dic
     return runs
 
 
+def run_and_store(url: str, bucket: str | None) -> dict:
+    result = probe(url)
+    if bucket:
+        import boto3
+
+        boto3.client("s3").put_object(
+            Bucket=bucket,
+            Key=key(result),
+            Body=json.dumps(result).encode(),
+            ContentType="application/json",
+        )
+    return result
+
+
+def handler(event: dict, context: object) -> dict:
+    """Lambda entrypoint: probe API_URL, keep the result in SERVING_BUCKET."""
+    import os
+
+    result = run_and_store(os.environ["API_URL"], os.environ.get("SERVING_BUCKET"))
+    failed = [r for r in result["results"] if r["status"] != 200]
+    if failed:
+        raise RuntimeError(f"endpoints failed: {failed}")
+    return result
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m spotgrid_lakehouse.monitoring.probe")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -116,17 +148,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     if args.command == "run":
-        result = probe(args.url)
+        result = run_and_store(args.url, args.bucket)
         print(json.dumps(result))
-        if args.bucket:
-            import boto3
-
-            boto3.client("s3").put_object(
-                Bucket=args.bucket,
-                Key=key(result),
-                Body=json.dumps(result).encode(),
-                ContentType="application/json",
-            )
         return 0 if all(r["status"] == 200 for r in result["results"]) else 1
 
     if args.file:

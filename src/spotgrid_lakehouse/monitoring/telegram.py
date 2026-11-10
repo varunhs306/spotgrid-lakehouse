@@ -136,10 +136,10 @@ def digest(
     if tomorrow := api.get("tomorrow"):
         lines += ["", f"💶 <b>Tomorrow ({day(tomorrow['local_date'])})</b>"]
         lines += [
-            f"Average: {tomorrow['avg_price_eur_mwh']:.0f} €/MWh",
-            f"Min: {tomorrow['min_price_eur_mwh']:.0f} €/MWh",
-            f"Max: {tomorrow['max_price_eur_mwh']:.0f} €/MWh",
-            f"Negative hours: {tomorrow['negative_price_hours']}",
+            f"Average: {tomorrow['base_eur_mwh']:.0f} €/MWh",
+            f"Min: {tomorrow['min_eur_mwh']:.0f} €/MWh",
+            f"Max: {tomorrow['max_eur_mwh']:.0f} €/MWh",
+            f"Negative hours: {tomorrow['negative_hours']}",
         ]
 
     lines += ["", "🌐 <b>API</b>"]

@@ -16,10 +16,10 @@ COMPLETE = {
 }
 TOMORROW = {
     "local_date": "2026-10-13",
-    "avg_price_eur_mwh": 197.23,
-    "min_price_eur_mwh": 15.4,
-    "max_price_eur_mwh": 234.79,
-    "negative_price_hours": 0,
+    "base_eur_mwh": 197.23,
+    "min_eur_mwh": 15.4,
+    "max_eur_mwh": 234.79,
+    "negative_hours": 0,
 }
 
 
